@@ -63,7 +63,7 @@ defmodule Meetcutes.Accounts.User do
     field :onetime_fees_paid, :boolean
     field :onetime_fees_required, :boolean
     field :accepted_onetime_fees_amount, :integer
-    field :user_state, Ecto.Enum, values: [:active, :inactive, :delete]
+    field :user_state, Ecto.Enum, values: [:active, :inactive, :suspended, :delete]
     field :email_verified, :boolean
     field :previous_events_attendees_list, {:array, :string}
     field :registered_events, {:array, :map}

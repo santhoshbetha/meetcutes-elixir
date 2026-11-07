@@ -1,4 +1,17 @@
 defmodule MeetcutesWeb.UserAuth do
+  @moduledoc """
+  Stateless bearer authentication for the JSON API.
+
+  The bearer value is an opaque cryptographically random session token. Only its
+  SHA-256 hash is stored in Postgres; every request verifies the token against
+  that shared repository. User/session metadata is intentionally not cached in
+  node-local ETS, process state, or the process dictionary, so any node behind
+  the load balancer can serve any request.
+
+  Phoenix.Token signatures are used for the websocket handshake in
+  `Meetcutes.Accounts.generate_websocket_token/1`.
+  """
+
   import Plug.Conn
   import Phoenix.Controller
 

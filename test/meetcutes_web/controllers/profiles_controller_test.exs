@@ -34,6 +34,8 @@ defmodule MeetcutesWeb.ProfilesControllerTest do
       assert profile["image_urls"] == []
       assert profile["avatar_url"] == nil
       assert profile["visibility_preference"] == "both"
+      assert profile["payment_feature_enabled"] == true
+      assert profile["maintenance_mode_active"] == false
 
       assert profile["visibility_preferences"] == %{
                "visibility_preference" => "both",
@@ -48,6 +50,25 @@ defmodule MeetcutesWeb.ProfilesControllerTest do
       conn = build_conn() |> get(~p"/api/v1/profiles/me")
 
       assert %{"status" => "error"} = json_response(conn, 401)
+    end
+
+    test "reflects runtime payment and maintenance flags", %{conn: conn} do
+      previous_payment = Application.get_env(:meetcutes, :payment_feature_enabled)
+      previous_maintenance = Application.get_env(:meetcutes, :maintenance_mode_active)
+
+      Application.put_env(:meetcutes, :payment_feature_enabled, false)
+      Application.put_env(:meetcutes, :maintenance_mode_active, true)
+
+      on_exit(fn ->
+        restore_env(:payment_feature_enabled, previous_payment)
+        restore_env(:maintenance_mode_active, previous_maintenance)
+      end)
+
+      conn = get(conn, ~p"/api/v1/profiles/me")
+
+      assert %{"data" => %{"profile" => profile}} = json_response(conn, 200)
+      assert profile["payment_feature_enabled"] == false
+      assert profile["maintenance_mode_active"] == true
     end
   end
 
@@ -495,4 +516,8 @@ defmodule MeetcutesWeb.ProfilesControllerTest do
       content_type: "image/png"
     }
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:meetcutes, key)
+
+  defp restore_env(key, value), do: Application.put_env(:meetcutes, key, value)
 end

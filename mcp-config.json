@@ -1,0 +1,76 @@
+{
+  "name": "manage_meetcutes_platform",
+  "description": "Executes backend administrative tasks on the MeetCutes server via secure API execution handshakes.",
+  "endpoint": {
+    "method": "POST",
+    "url": "${MEETCUTES_API_URL}/api/v1/admin/mcp-action",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-MCP-Admin-Key": "${MCP_ADMIN_SECRET_KEY}"
+    }
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "get_system_stats",
+          "toggle_maintenance",
+          "toggle_paywall",
+          "update_user_status",
+          "force_match_count"
+        ]
+      },
+      "params": {
+        "type": "object",
+        "description": "Action-specific parameters.",
+        "properties": {
+          "value": {
+            "type": ["boolean", "string"],
+            "description": "Boolean value for toggle actions. Also accepts enabled/active aliases."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "User ULID for update_user_status or force_match_count."
+          },
+          "email": {
+            "type": "string",
+            "description": "Email lookup for update_user_status or force_match_count."
+          },
+          "user_state": {
+            "type": "string",
+            "enum": ["active", "inactive", "suspended", "delete"]
+          },
+          "count": {
+            "type": ["integer", "string"],
+            "minimum": 0,
+            "description": "Target around_user_count for force_match_count."
+          }
+        }
+      }
+    },
+    "required": ["action"]
+  },
+  "examples": [
+    {
+      "action": "get_system_stats"
+    },
+    {
+      "action": "toggle_maintenance",
+      "params": { "value": true }
+    },
+    {
+      "action": "toggle_paywall",
+      "params": { "value": false }
+    },
+    {
+      "action": "update_user_status",
+      "params": { "email": "member@example.com", "user_state": "suspended" }
+    },
+    {
+      "action": "force_match_count",
+      "params": { "user_id": "01J...", "count": 250 }
+    }
+  ]
+}

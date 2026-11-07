@@ -25,6 +25,13 @@ defmodule MeetcutesWeb.Router do
     plug :require_authenticated_user
   end
 
+  # Independent high-entropy gate for the MCP administrative command API.
+  # This pipeline never reads a user bearer token.
+  pipeline :mcp_admin do
+    plug :accepts, ["json"]
+    plug MeetcutesWeb.Plugs.McpAdminAuth
+  end
+
   # Operator telemetry dashboard. Credentials are read at request time from
   # runtime configuration so no secrets are compiled into the release.
   scope "/" do
@@ -48,7 +55,6 @@ defmodule MeetcutesWeb.Router do
     # Add this line right here
     get "/health", HealthController, :show
     delete "/users/logout", SessionController, :delete
-
     # Read-only reset-token validation for the React `/auth/confirm` page.
     # It lives outside `:api_unauthenticated` so a signed-in user can still
     # follow a recovery link, and it never consumes the token.
@@ -69,6 +75,14 @@ defmodule MeetcutesWeb.Router do
     # Stripe signs the raw request body, so this route stays outside the
     # bearer-authenticated pipeline.
     post "/v1/payments/webhook", PaymentController, :webhook
+  end
+
+  # MCP administrative command surface. Isolated from user authentication and
+  # guarded only by the runtime X-MCP-Admin-Key shared secret.
+  scope "/api", MeetcutesWeb do
+    pipe_through :mcp_admin
+
+    post "/v1/admin/mcp-action", AdminController, :mcp_action
   end
 
   scope "/api", MeetcutesWeb do

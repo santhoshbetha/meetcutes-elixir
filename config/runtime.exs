@@ -32,11 +32,42 @@ get_env = fn key ->
   end
 end
 
+get_int = fn key, default ->
+  case get_env.(key) do
+    nil ->
+      default
+
+    value ->
+      case Integer.parse(value) do
+        {parsed, ""} -> parsed
+        _ -> default
+      end
+  end
+end
+
 case get_env.("RATE_LIMIT_ENABLED") do
   "false" -> config :meetcutes, :rate_limit_enabled, false
   "true" -> config :meetcutes, :rate_limit_enabled, true
   _ -> :ok
 end
+
+truthy? = fn value ->
+  value
+  |> String.downcase()
+  |> then(&(&1 in ~w(true 1 yes on)))
+end
+
+case get_env.("PAYMENT_FEATURE_ENABLED") do
+  nil -> :ok
+  value -> config :meetcutes, :payment_feature_enabled, truthy?.(value)
+end
+
+case get_env.("MAINTENANCE_MODE_ACTIVE") do
+  nil -> :ok
+  value -> config :meetcutes, :maintenance_mode_active, truthy?.(value)
+end
+
+config :meetcutes, :mcp_admin_secret_key, get_env.("MCP_ADMIN_SECRET_KEY")
 
 dashboard_password =
   get_env.("DASHBOARD_PASSWORD") ||
@@ -188,13 +219,29 @@ if config_env() == :prod do
 
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
+  # Prefer the explicit production pool variable, then the legacy POOL_SIZE.
+  # Keep a safe fallback so a malformed value cannot prevent the release boot.
+  pool_size =
+    (get_int.("DATABASE_POOL_SIZE", get_int.("POOL_SIZE", 10)) || 10)
+    |> max(1)
+
   config :meetcutes, Meetcutes.Repo,
     url: clean_database_url,
     ssl: database_ssl,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
+    pool_size: pool_size,
     # For machines with several cores, consider starting multiple pools of `pool_size`
     # pool_count: 4,
-    socket_options: maybe_ipv6
+    socket_options: [keepalive: true] ++ maybe_ipv6
+
+  # Queue concurrency can be tuned per container without rebuilding the image.
+  # Defaults match config/config.exs and keep a single-container deployment
+  # responsive while preventing Oban from monopolising database connections.
+  config :meetcutes, Oban,
+    queues: [
+      default: max(get_int.("OBAN_DEFAULT_CONCURRENCY", 10), 1),
+      events: max(get_int.("OBAN_EVENTS_CONCURRENCY", 5), 1),
+      mailer: max(get_int.("OBAN_MAILER_CONCURRENCY", 5), 1)
+    ]
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

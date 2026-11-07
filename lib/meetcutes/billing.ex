@@ -14,7 +14,7 @@ defmodule Meetcutes.Billing do
 
   alias Meetcutes.Accounts.User
   alias Meetcutes.Billing.{Invoice, InvoicePDF, InvoiceStorage, Receipt, StripeClient}
-  alias Meetcutes.Mailer
+  alias Meetcutes.Emails.Mailer
   alias Meetcutes.Repo
 
   @amount_cents 5_000
@@ -242,10 +242,11 @@ defmodule Meetcutes.Billing do
       |> Swoosh.Email.subject("Your MeetCutes premium membership receipt (##{invoice.id})")
       |> Swoosh.Email.text_body(receipt)
 
-    # Meetcutes.Mailer owns the runtime Resend adapter in production.
-    case Mailer.deliver(email) do
-      {:ok, _result} -> :ok
-      {:error, reason} -> Logger.warning("Invoice email failed: #{inspect(reason)}")
+    # Queue through Oban's mailer worker so the webhook response never waits on
+    # an external email provider. The invoice itself is already committed.
+    case Mailer.deliver_async(email) do
+      {:ok, _job} -> :ok
+      {:error, reason} -> Logger.warning("Invoice email enqueue failed: #{inspect(reason)}")
     end
   end
 

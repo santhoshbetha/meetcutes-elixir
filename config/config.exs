@@ -38,6 +38,12 @@ config :meetcutes, :membership_fee_usd, 50
 # Search API token-bucket limiter. Disable only in isolated test/E2E runs.
 config :meetcutes, :rate_limit_enabled, true
 
+# Runtime operational flags. These can be overridden by config/runtime.exs
+# without rebuilding a release.
+config :meetcutes, :payment_feature_enabled, true
+config :meetcutes, :maintenance_mode_active, false
+config :meetcutes, :mcp_admin_secret_key, nil
+
 config :meetcutes, Meetcutes.Repo,
   migration_primary_key: [name: :id, type: :string],
   migration_foreign_key: [type: :string]

@@ -1,5 +1,6 @@
 defmodule Meetcutes.BillingTest do
   use Meetcutes.DataCase, async: false
+  use Oban.Testing, repo: Meetcutes.Repo
 
   import Meetcutes.AccountsFixtures
 
@@ -67,6 +68,7 @@ defmodule Meetcutes.BillingTest do
       assert DateTime.diff(updated.subscription_expires_at, DateTime.utc_now(), :day) >= 364
       assert Billing.subscription_active?(updated)
       assert invoice.period_end == DateTime.add(invoice.period_start, 365, :day)
+      assert_enqueued(worker: Meetcutes.Workers.MailerWorker)
     end
 
     test "is idempotent for repeated Stripe deliveries", %{user: user} do

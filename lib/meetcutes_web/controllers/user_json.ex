@@ -80,6 +80,8 @@ defmodule MeetcutesWeb.UserJSON do
       around_user_count_updated_at: user.around_user_count_updated_at,
       subscription_expires_at: user.subscription_expires_at,
       subscription_active: subscription_active?(user.subscription_expires_at),
+      payment_feature_enabled: Application.get_env(:meetcutes, :payment_feature_enabled, true),
+      maintenance_mode_active: Application.get_env(:meetcutes, :maintenance_mode_active, false),
       user_state: user.user_state,
       email_verified: user.email_verified,
       previous_events_attendees_list: user.previous_events_attendees_list,

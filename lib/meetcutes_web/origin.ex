@@ -18,6 +18,8 @@ defmodule MeetcutesWeb.Origin do
     "http://127.0.0.1:5173",
     "http://localhost:5180",
     "http://127.0.0.1:5180",
+    "https://localhost",
+    "capacitor://localhost",
     "https://meetcutes.us",
     "https://*.meetcutes.us"
   ]
