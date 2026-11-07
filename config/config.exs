@@ -42,6 +42,7 @@ config :meetcutes, :rate_limit_enabled, true
 # without rebuilding a release.
 config :meetcutes, :payment_feature_enabled, true
 config :meetcutes, :maintenance_mode_active, false
+config :meetcutes, :global_announcement, nil
 config :meetcutes, :mcp_admin_secret_key, nil
 
 config :meetcutes, Meetcutes.Repo,

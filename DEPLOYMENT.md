@@ -79,6 +79,48 @@ Supported states: `active`, `inactive`, `suspended`, `delete`.
 Sets `around_user_count` and its refresh timestamp directly, which is useful for
 testing paywall thresholds.
 
+### `push_notification`
+
+Supports three target scopes:
+
+```json
+{
+  "action": "push_notification",
+  "params": {
+    "target_scope": "all",
+    "title": "Weekend meetup",
+    "body": "A new gathering is happening near you."
+  }
+}
+```
+
+- `all` targets every active profile.
+- `user` accepts `email` or `user_handle`.
+- `area` accepts `center_lat`, `center_lng`, and `radius_miles`.
+
+Rows are inserted atomically, then each user's `user_notifications:<user_id>`
+Phoenix topic receives a `new_notification` event.
+
+### `set_global_announcement`
+
+```json
+{
+  "action": "set_global_announcement",
+  "params": {
+    "message": "Holiday giveaway: premium discovery is free this week."
+  }
+}
+```
+
+Sending an empty string or `null` clears the public banner. The public endpoint
+is:
+
+```text
+GET /api/v1/public/global-announcement
+```
+
+It returns either `{"message":"..."}` or `{"message":null}`.
+
 ## Node.js MCP tool mapping
 
 Use `mcp-config.json` as the tool definition. The server-side handler should:

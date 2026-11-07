@@ -19,7 +19,9 @@
           "toggle_maintenance",
           "toggle_paywall",
           "update_user_status",
-          "force_match_count"
+          "force_match_count",
+          "push_notification",
+          "set_global_announcement"
         ]
       },
       "params": {
@@ -46,6 +48,39 @@
             "type": ["integer", "string"],
             "minimum": 0,
             "description": "Target around_user_count for force_match_count."
+          },
+          "target_scope": {
+            "type": "string",
+            "enum": ["all", "user", "area"],
+            "description": "Notification audience for push_notification."
+          },
+          "title": {
+            "type": "string",
+            "description": "Notification title for push_notification."
+          },
+          "body": {
+            "type": "string",
+            "description": "Notification body for push_notification."
+          },
+          "user_handle": {
+            "type": "string",
+            "description": "Handle lookup for user-scoped operations."
+          },
+          "center_lat": {
+            "type": ["number", "string"],
+            "description": "Area center latitude for push_notification."
+          },
+          "center_lng": {
+            "type": ["number", "string"],
+            "description": "Area center longitude for push_notification."
+          },
+          "radius_miles": {
+            "type": ["number", "string"],
+            "description": "Area radius in miles for push_notification."
+          },
+          "message": {
+            "type": ["string", "null"],
+            "description": "Global announcement text. Null or empty clears the banner."
           }
         }
       }
@@ -71,6 +106,23 @@
     {
       "action": "force_match_count",
       "params": { "user_id": "01J...", "count": 250 }
+    },
+    {
+      "action": "push_notification",
+      "params": {
+        "target_scope": "area",
+        "center_lat": 30.2672,
+        "center_lng": -97.7431,
+        "radius_miles": 25,
+        "title": "Weekend meetup",
+        "body": "A new gathering is happening near you."
+      }
+    },
+    {
+      "action": "set_global_announcement",
+      "params": {
+        "message": "Holiday giveaway: premium discovery is free this week."
+      }
     }
   ]
 }

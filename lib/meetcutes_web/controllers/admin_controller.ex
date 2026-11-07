@@ -14,6 +14,8 @@ defmodule MeetcutesWeb.AdminController do
   alias Meetcutes.Repo
   alias Meetcutes.Accounts.{User, UserToken}
   alias Meetcutes.Events.Event
+  alias Meetcutes.Matching
+  alias Meetcutes.Notifications
 
   @valid_states ~w(active inactive suspended delete deleted locked)
 
@@ -27,6 +29,8 @@ defmodule MeetcutesWeb.AdminController do
       "toggle_paywall" -> toggle_flag(conn, :payment_feature_enabled, params)
       "update_user_status" -> update_user_status(conn, params)
       "force_match_count" -> force_match_count(conn, params)
+      "push_notification" -> push_notification(conn, params)
+      "set_global_announcement" -> set_global_announcement(conn, params)
       _ -> error(conn, :unprocessable_entity, "Unsupported MCP action.")
     end
   end
@@ -199,6 +203,131 @@ defmodule MeetcutesWeb.AdminController do
     end
   end
 
+  defp push_notification(conn, params) do
+    scope = first_present(params, ~w(target_scope scope))
+    title = normalize_text(first_present(params, ~w(title)))
+    body = normalize_text(first_present(params, ~w(body message)))
+
+    with {:ok, scope} <- normalize_scope(scope),
+         :ok <- validate_notification_title(title),
+         {:ok, user_ids} <- notification_targets(scope, params) do
+      result =
+        Repo.transaction(fn ->
+          entries =
+            Notifications.build_admin_broadcasts(user_ids, title, body, %{
+              "scope" => scope
+            })
+
+          count = Notifications.insert_broadcast_entries(entries)
+          {count, entries}
+        end)
+
+      case result do
+        {:ok, {count, entries}} ->
+          Notifications.broadcast_entries(entries)
+
+          json(conn, %{
+            success: true,
+            status: "success",
+            data: %{target_scope: scope, recipients: count}
+          })
+
+        {:error, reason} ->
+          error(conn, :unprocessable_entity, "Could not insert notifications: #{inspect(reason)}")
+      end
+    else
+      {:error, :invalid_scope} ->
+        error(conn, :unprocessable_entity, "Invalid notification target scope.")
+
+      {:error, :missing_title} ->
+        error(conn, :unprocessable_entity, "Notification title is required.")
+
+      {:error, :not_found} ->
+        error(conn, :not_found, "Target user not found.")
+
+      {:error, :invalid_coordinates} ->
+        error(conn, :unprocessable_entity, "Invalid area coordinates or radius.")
+    end
+  end
+
+  defp set_global_announcement(conn, params) do
+    message = normalize_text(first_present(params, ~w(message announcement)))
+    Application.put_env(:meetcutes, :global_announcement, message)
+
+    json(conn, %{
+      success: true,
+      status: "success",
+      data: %{message: message}
+    })
+  end
+
+  defp notification_targets("all", _params) do
+    {:ok,
+     Repo.all(
+       from(u in User,
+         where:
+           u.is_active == true and u.user_state == :active and
+             is_nil(u.deleted_at),
+         select: u.id
+       )
+     )}
+  end
+
+  defp notification_targets("user", params) do
+    with {:ok, user} <- find_user(params), do: {:ok, [user.id]}
+  end
+
+  defp notification_targets("area", params) do
+    with {:ok, latitude} <- parse_float(first_present(params, ~w(center_lat lat latitude))),
+         {:ok, longitude} <- parse_float(first_present(params, ~w(center_lng lng longitude))),
+         {:ok, radius_miles} <-
+           parse_float(first_present(params, ~w(radius_miles radius))),
+         true <- radius_miles > 0 do
+      {:ok, Matching.users_within_radius(latitude, longitude, radius_miles)}
+    else
+      _ -> {:error, :invalid_coordinates}
+    end
+  end
+
+  defp notification_targets(_scope, _params), do: {:error, :invalid_scope}
+
+  defp normalize_scope(nil), do: {:error, :invalid_scope}
+
+  defp normalize_scope(scope) when is_binary(scope) do
+    case scope |> String.trim() |> String.downcase() do
+      "all" -> {:ok, "all"}
+      "user" -> {:ok, "user"}
+      "area" -> {:ok, "area"}
+      _ -> {:error, :invalid_scope}
+    end
+  end
+
+  defp normalize_scope(_scope), do: {:error, :invalid_scope}
+
+  defp validate_notification_title(title) when is_binary(title) and title != "", do: :ok
+  defp validate_notification_title(_title), do: {:error, :missing_title}
+
+  defp normalize_text(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_text(value) when is_number(value), do: to_string(value)
+  defp normalize_text(_value), do: nil
+
+  defp parse_float(value) when is_number(value), do: {:ok, value / 1}
+
+  defp parse_float(value) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {number, ""} -> {:ok, number}
+      _ -> {:error, :invalid_coordinates}
+    end
+  end
+
+  defp parse_float(_value), do: {:error, :invalid_coordinates}
+
   defp state_attrs(:active), do: %{user_state: :active, is_active: true, is_locked: false}
   defp state_attrs(:inactive), do: %{user_state: :inactive, is_active: false, is_locked: false}
   defp state_attrs(:suspended), do: %{user_state: :suspended, is_active: false, is_locked: true}
@@ -223,6 +352,17 @@ defmodule MeetcutesWeb.AdminController do
     cond do
       id = first_present(params, ~w(user_id id)) ->
         case Repo.get(User, id) do
+          nil -> {:error, :not_found}
+          user -> {:ok, user}
+        end
+
+      handle = first_present(params, ~w(user_handle userhandle handle nickname)) ->
+        case Repo.one(
+               from(u in User,
+                 where: fragment("LOWER(?) = LOWER(?)", u.nickname, ^handle),
+                 limit: 1
+               )
+             ) do
           nil -> {:error, :not_found}
           user -> {:ok, user}
         end

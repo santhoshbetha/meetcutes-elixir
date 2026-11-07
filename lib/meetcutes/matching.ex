@@ -102,6 +102,35 @@ defmodule Meetcutes.Matching do
   end
 
   @doc """
+  Returns active user ids whose geohash falls within `radius_miles` of the
+  supplied coordinates.
+
+  The query is narrowed with the same precision-3 geohash cell ring used by the
+  match counter, then checked with the exact Haversine distance.
+  """
+  def users_within_radius(latitude, longitude, radius_miles)
+      when is_number(latitude) and is_number(longitude) and is_number(radius_miles) and
+             radius_miles > 0 do
+    rings = max(@geohash_rings, ceil(radius_miles / 60))
+    prefixes = geohash_prefixes(latitude, longitude, rings)
+
+    User
+    |> where(
+      [u],
+      u.is_active == true and u.user_state == :active and is_nil(u.deleted_at) and
+        not is_nil(u.geohash)
+    )
+    |> where([u], fragment("left(?, ?)", u.geohash, ^@geohash_precision) in ^prefixes)
+    |> Repo.all()
+    |> Enum.filter(fn user ->
+      within_radius?(latitude, longitude, user.geohash, radius_miles)
+    end)
+    |> Enum.map(& &1.id)
+  end
+
+  def users_within_radius(_latitude, _longitude, _radius_miles), do: []
+
+  @doc """
   Counts active opposite-gender profiles within the configured radius.
 
   Returns `{:ok, integer}`. Viewers without a geohash or a binary gender get a
@@ -163,9 +192,13 @@ defmodule Meetcutes.Matching do
   defp within_radius?(_latitude, _longitude, _geohash, _radius_miles), do: false
 
   defp geohash_prefixes(latitude, longitude) do
+    geohash_prefixes(latitude, longitude, @geohash_rings)
+  end
+
+  defp geohash_prefixes(latitude, longitude, rings) do
     center = Geohash.encode(latitude, longitude, @geohash_precision)
 
-    expand_rings([center], @geohash_rings)
+    expand_rings([center], rings)
     |> Enum.uniq()
   end
 

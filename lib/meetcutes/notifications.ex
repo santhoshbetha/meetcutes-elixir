@@ -136,6 +136,44 @@ defmodule Meetcutes.Notifications do
   end
 
   @doc """
+  Builds insertable admin-broadcast rows for the MCP notification command.
+  """
+  def build_admin_broadcasts(user_ids, title, body, metadata \\ %{}) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    user_ids
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.map(fn user_id ->
+      %{
+        id: Ecto.ULID.generate(),
+        user_id: user_id,
+        type: :admin_broadcast,
+        title: title,
+        body: body,
+        is_read: false,
+        metadata: metadata || %{},
+        inserted_at: now,
+        updated_at: now
+      }
+    end)
+  end
+
+  @doc """
+  Batch-inserts prepared admin-broadcast rows.
+  """
+  def insert_broadcast_entries(entries) when is_list(entries) do
+    {count, _result} = Repo.insert_all(Notification, entries)
+    count
+  end
+
+  @doc """
+  Broadcasts prepared admin-broadcast rows after their transaction commits.
+  """
+  def broadcast_entries(entries) when is_list(entries),
+    do: Enum.each(entries, &broadcast_payload/1)
+
+  @doc """
   Deletes every notification owned by `user_id`.
   """
   def delete_all_for_user(user_id) when is_binary(user_id) do
@@ -146,27 +184,41 @@ defmodule Meetcutes.Notifications do
   # broadcast must never turn a successful insert into a request error, so the
   # push is best effort and only logged.
   defp broadcast_created(%Notification{} = notification) do
+    broadcast_payload(%{
+      id: notification.id,
+      user_id: notification.user_id,
+      type: Atom.to_string(notification.type),
+      title: notification.title,
+      body: notification.body,
+      is_read: notification.is_read,
+      metadata: notification.metadata,
+      inserted_at: notification.inserted_at
+    })
+  end
+
+  defp broadcast_payload(entry) do
     Endpoint.broadcast!(
-      "user_notifications:#{notification.user_id}",
+      "user_notifications:#{entry.user_id}",
       "new_notification",
       %{
-        id: notification.id,
-        type: Atom.to_string(notification.type),
-        title: notification.title,
-        body: notification.body,
-        is_read: notification.is_read,
-        metadata: notification.metadata,
-        inserted_at: notification.inserted_at
+        id: entry.id,
+        type: notification_type(entry.type),
+        title: entry.title,
+        body: entry.body,
+        is_read: entry.is_read,
+        metadata: entry.metadata,
+        inserted_at: entry.inserted_at
       }
     )
   rescue
     error ->
-      Logger.warning(
-        "Unable to broadcast notification #{notification.id}: #{Exception.message(error)}"
-      )
+      Logger.warning("Unable to broadcast notification #{entry.id}: #{Exception.message(error)}")
 
       :error
   end
+
+  defp notification_type(type) when is_atom(type), do: Atom.to_string(type)
+  defp notification_type(type), do: type
 
   defp put_user_id(changeset, attrs) do
     case fetch_user_id(attrs) do

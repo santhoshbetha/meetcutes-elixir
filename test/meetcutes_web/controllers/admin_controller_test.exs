@@ -8,6 +8,7 @@ defmodule MeetcutesWeb.AdminControllerTest do
   alias Meetcutes.Accounts.{User, UserToken}
   alias Meetcutes.Events
   alias Meetcutes.Locations
+  alias Meetcutes.Notifications.Notification
   alias Meetcutes.Repo
 
   @secret "test-mcp-admin-secret-key-0123456789"
@@ -161,6 +162,178 @@ defmodule MeetcutesWeb.AdminControllerTest do
       assert response["success"] == true
       assert response["data"]["payment_feature_enabled"] == false
       assert Application.get_env(:meetcutes, :payment_feature_enabled) == false
+    end
+  end
+
+  describe "push_notification" do
+    test "targets one user by handle, inserts one row, and broadcasts live", %{conn: conn} do
+      user = user_fixture(%{nickname: "mcp_notify_user"})
+      topic = "user_notifications:#{user.id}"
+      Phoenix.PubSub.subscribe(Meetcutes.PubSub, topic)
+
+      response =
+        conn
+        |> post(~p"/api/v1/admin/mcp-action", %{
+          "action" => "push_notification",
+          "params" => %{
+            "target_scope" => "user",
+            "user_handle" => user.nickname,
+            "title" => "Hello from MCP",
+            "body" => "A targeted notification."
+          }
+        })
+        |> json_response(200)
+
+      assert response["success"] == true
+      assert response["data"]["target_scope"] == "user"
+      assert response["data"]["recipients"] == 1
+
+      assert Repo.aggregate(
+               from(n in Notification, where: n.user_id == ^user.id),
+               :count,
+               :id
+             ) == 1
+
+      assert_receive %Phoenix.Socket.Broadcast{
+                       event: "new_notification",
+                       payload: %{title: "Hello from MCP", type: "admin_broadcast"}
+                     },
+                     1_000
+    end
+
+    test "targets all active profiles and skips inactive users", %{conn: conn} do
+      active_one =
+        user_fixture()
+        |> Ecto.Changeset.change(is_active: true, user_state: :active)
+        |> Repo.update!()
+
+      active_two =
+        user_fixture()
+        |> Ecto.Changeset.change(is_active: true, user_state: :active)
+        |> Repo.update!()
+
+      inactive =
+        user_fixture()
+        |> Ecto.Changeset.change(is_active: false, user_state: :inactive)
+        |> Repo.update!()
+
+      response =
+        conn
+        |> post(~p"/api/v1/admin/mcp-action", %{
+          "action" => "push_notification",
+          "params" => %{
+            "target_scope" => "all",
+            "title" => "Platform update",
+            "body" => "Everyone should see this."
+          }
+        })
+        |> json_response(200)
+
+      assert response["data"]["recipients"] == 2
+
+      for user <- [active_one, active_two] do
+        assert Repo.aggregate(
+                 from(n in Notification, where: n.user_id == ^user.id),
+                 :count,
+                 :id
+               ) == 1
+      end
+
+      assert Repo.aggregate(
+               from(n in Notification, where: n.user_id == ^inactive.id),
+               :count,
+               :id
+             ) == 0
+    end
+
+    test "targets users inside an area radius", %{conn: conn} do
+      near =
+        user_fixture()
+        |> Ecto.Changeset.change(
+          is_active: true,
+          user_state: :active,
+          geohash: Geohash.encode(30.2672, -97.7431, 9)
+        )
+        |> Repo.update!()
+
+      far =
+        user_fixture()
+        |> Ecto.Changeset.change(
+          is_active: true,
+          user_state: :active,
+          geohash: Geohash.encode(32.7767, -96.7970, 9)
+        )
+        |> Repo.update!()
+
+      response =
+        conn
+        |> post(~p"/api/v1/admin/mcp-action", %{
+          "action" => "push_notification",
+          "params" => %{
+            "target_scope" => "area",
+            "center_lat" => 30.2672,
+            "center_lng" => -97.7431,
+            "radius_miles" => 25,
+            "title" => "Nearby meetup",
+            "body" => "A gathering is happening near you."
+          }
+        })
+        |> json_response(200)
+
+      assert response["data"]["recipients"] == 1
+
+      assert Repo.aggregate(
+               from(n in Notification, where: n.user_id == ^near.id),
+               :count,
+               :id
+             ) == 1
+
+      assert Repo.aggregate(
+               from(n in Notification, where: n.user_id == ^far.id),
+               :count,
+               :id
+             ) == 0
+    end
+  end
+
+  describe "global announcement" do
+    test "stores and clears the public banner", %{conn: conn} do
+      previous = Application.get_env(:meetcutes, :global_announcement)
+
+      on_exit(fn ->
+        restore_env(:global_announcement, previous)
+      end)
+
+      response =
+        conn
+        |> post(~p"/api/v1/admin/mcp-action", %{
+          "action" => "set_global_announcement",
+          "params" => %{"message" => "Holiday giveaway is live."}
+        })
+        |> json_response(200)
+
+      assert response["data"]["message"] == "Holiday giveaway is live."
+
+      public =
+        build_conn()
+        |> get(~p"/api/v1/public/global-announcement")
+        |> json_response(200)
+
+      assert public == %{"message" => "Holiday giveaway is live."}
+
+      conn
+      |> post(~p"/api/v1/admin/mcp-action", %{
+        "action" => "set_global_announcement",
+        "params" => %{"message" => ""}
+      })
+      |> json_response(200)
+
+      cleared =
+        build_conn()
+        |> get(~p"/api/v1/public/global-announcement")
+        |> json_response(200)
+
+      assert cleared == %{"message" => nil}
     end
   end
 

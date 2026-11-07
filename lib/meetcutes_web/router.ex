@@ -75,6 +75,9 @@ defmodule MeetcutesWeb.Router do
     # Stripe signs the raw request body, so this route stays outside the
     # bearer-authenticated pipeline.
     post "/v1/payments/webhook", PaymentController, :webhook
+
+    # Public, unauthenticated landing-page configuration.
+    get "/v1/public/global-announcement", PublicController, :global_announcement
   end
 
   # MCP administrative command surface. Isolated from user authentication and
