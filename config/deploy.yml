@@ -1,0 +1,68 @@
+# Kamal 2 deployment for the Meetcutes Phoenix API.
+#
+# Replace the registry, host, and domain placeholders before the first deploy.
+# Every credential stays in `.kamal/secrets`; nothing sensitive belongs here.
+service: meetcutes-api
+# Kamal joins `registry.server` and `image`, so do not repeat the registry host
+# here. The resulting repository is ghcr.io/your-org/meetcutes-api.
+image: your-org/meetcutes-api
+
+servers:
+  web:
+    hosts:
+      # Replace with the public IP of the self-hosted server.
+      - 203.0.113.10
+    # kamal-proxy terminates TLS and owns ports 80/443. Kamal automatically
+    # keeps the app container's port private when the proxy is enabled.
+
+proxy:
+  ssl: true
+  # kamal-proxy is the trusted edge; forward client IP/proto headers so the
+  # app's rate limiter and URL generation see the real request context.
+  forward_headers: true
+  host: api.meetcutes.us
+  app_port: 4000
+  healthcheck:
+    path: /health
+    interval: 3
+    timeout: 5
+
+registry:
+  server: ghcr.io
+  username: your-org
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  # Match the target server architecture (use arm64 for ARM hosts).
+  arch: amd64
+
+env:
+  clear:
+    PHX_SERVER: "true"
+    PHX_HOST: api.meetcutes.us
+    PHX_URL_SCHEME: https
+    PHX_URL_PORT: "443"
+    PORT: "4000"
+    FRONTEND_URL: https://meetcutes.us
+    CORS_ORIGINS: https://meetcutes.us,https://www.meetcutes.us
+    RATE_LIMIT_ENABLED: "true"
+    DATABASE_POOL_SIZE: "10"
+    OBAN_DEFAULT_CONCURRENCY: "10"
+    OBAN_EVENTS_CONCURRENCY: "5"
+    OBAN_MAILER_CONCURRENCY: "5"
+  secret:
+    - DATABASE_URL
+    - SECRET_KEY_BASE
+    - DASHBOARD_USER
+    - DASHBOARD_PASSWORD
+    - STRIPE_SECRET_KEY
+    - RESEND_API_KEY
+    - STRIPE_WEBHOOK_SECRET
+    - MCP_ADMIN_SECRET_KEY
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
+    - CLOUDFLARE_ACCOUNT_ID
+
+# Allow the boot-time migration step and the first health check to finish.
+deploy_timeout: 120

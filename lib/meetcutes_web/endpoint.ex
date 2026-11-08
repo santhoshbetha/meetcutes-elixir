@@ -63,5 +63,10 @@ defmodule MeetcutesWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
+
+  # Proactive container health probe. Mounted directly above the router so
+  # `/health` never touches application controllers, authentication, or Oban.
+  plug MeetcutesWeb.Plugs.HealthCheck
+
   plug MeetcutesWeb.Router
 end

@@ -29,6 +29,8 @@ meetcutes-*.tar
 
 # Ignore assets that are produced by build tools.
 /priv/static/assets/
+/priv/static/*.gz
+/priv/static/*-*.*
 
 # Ignore digested assets cache.
 /priv/static/cache_manifest.json
@@ -39,6 +41,9 @@ npm-debug.log
 
 # Environment variables
 .env
+
+# Kamal secrets are local-only.
+.kamal/secrets
 
 ReadMe.txt
 

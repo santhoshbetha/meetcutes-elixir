@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+# This overlay is assembled into <release-root>/bin/server, which is
+# /app/bin/server in the production image.
+RELEASE_BIN_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd)"
+
+export PHX_SERVER="${PHX_SERVER:-true}"
+
+# The database must be schema-complete before kamal-proxy routes live traffic.
+# A failed migration aborts the boot, so the container is replaced instead of
+# serving requests against a stale schema.
+echo "Running database migrations..."
+"$RELEASE_BIN_DIR/meetcutes" eval "Meetcutes.Release.migrate"
+
+echo "Starting meetcutes..."
+exec "$RELEASE_BIN_DIR/meetcutes" start

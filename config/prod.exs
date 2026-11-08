@@ -20,5 +20,16 @@ config :swoosh, local: false
 # Do not print debug messages in production
 config :logger, level: :info
 
+# The release filesystem is immutable and the process runs as `nobody`. The
+# `tz` periodic updater downloads and recompiles IANA data inside its own priv
+# directory, which is read-only in the production image. Keep the baked-in data
+# and refresh it by rebuilding the image or bumping the `:tz` dependency.
+config :meetcutes, :start_tz_updater, false
+
+# `tzdata` (pulled in transitively) starts its own background updater, which
+# also writes into the dependency's read-only priv directory. Disable it for
+# the same immutable-container reason.
+config :tzdata, :autoupdate, :disabled
+
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.
