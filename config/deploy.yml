@@ -5,13 +5,13 @@
 service: meetcutes-api
 # Kamal joins `registry.server` and `image`, so do not repeat the registry host
 # here. The resulting repository is ghcr.io/your-org/meetcutes-api.
-image: your-org/meetcutes-api
+image: santhoshbetha/meetcutes-api
 
 servers:
   web:
     hosts:
       # Replace with the public IP of the self-hosted server.
-      - 203.0.113.10
+      - 157.180.85.205
     # kamal-proxy terminates TLS and owns ports 80/443. Kamal automatically
     # keeps the app container's port private when the proxy is enabled.
 
@@ -29,13 +29,14 @@ proxy:
 
 registry:
   server: ghcr.io
-  username: your-org
+  username: santhoshbetha
   password:
     - KAMAL_REGISTRY_PASSWORD
 
 builder:
   # Match the target server architecture (use arm64 for ARM hosts).
-  arch: amd64
+  arch:
+    - arm64
 
 env:
   clear:
@@ -53,6 +54,7 @@ env:
     OBAN_MAILER_CONCURRENCY: "5"
   secret:
     - DATABASE_URL
+    - POOL_SIZE
     - SECRET_KEY_BASE
     - DASHBOARD_USER
     - DASHBOARD_PASSWORD
