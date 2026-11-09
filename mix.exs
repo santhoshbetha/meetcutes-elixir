@@ -51,9 +51,6 @@ defmodule Meetcutes.MixProject do
       {:lazy_html, ">= 0.1.0", only: :test},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:swoosh, "~> 1.16"},
-      # Resend's native Swoosh adapter talks to the Resend HTTP API directly
-      # instead of opening an SMTP connection.
-      {:resend, "~> 1.0.0-rc.3"},
       {:req, "~> 0.5"},
       {:finch, "~> 0.16"},
       {:telemetry_metrics, "~> 1.0"},

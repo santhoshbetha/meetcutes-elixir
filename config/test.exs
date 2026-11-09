@@ -59,3 +59,7 @@ config :meetcutes, :invoice_storage, Meetcutes.Billing.InvoiceStorageStub
 config :meetcutes, :stripe,
   webhook_secret: "whsec_test",
   frontend_url: "http://localhost:5180"
+
+# Mail links in tests use the verified production client domain so assertions
+# catch accidental internal API URLs.
+config :meetcutes, Meetcutes.Accounts, frontend_url: "https://meetcutes.us"

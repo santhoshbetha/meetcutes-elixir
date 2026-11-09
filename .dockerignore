@@ -15,6 +15,7 @@
 
 # Test sources are not part of the production release.
 /test/
+/priv/e2e/
 
 # Never send local credentials or environment files into the build context.
 .env

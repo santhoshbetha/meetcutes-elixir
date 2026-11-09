@@ -47,6 +47,7 @@ env:
     PORT: "4000"
     FRONTEND_URL: https://meetcutes.us
     CORS_ORIGINS: https://meetcutes.us,https://www.meetcutes.us
+    MAIL_FROM_EMAIL: noreply@meetcutes.us
     RATE_LIMIT_ENABLED: "true"
     DATABASE_POOL_SIZE: "10"
     OBAN_DEFAULT_CONCURRENCY: "10"
@@ -66,5 +67,10 @@ env:
     - AWS_SECRET_ACCESS_KEY
     - CLOUDFLARE_ACCOUNT_ID
 
+logging:
+  driver: loki
+  options:
+    loki-url: "https://1870801:${LOKI_API_TOKEN}@logs-prod-006.grafana.net/loki/api/v1/push"
+  
 # Allow the boot-time migration step and the first health check to finish.
 deploy_timeout: 120

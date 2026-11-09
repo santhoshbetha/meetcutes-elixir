@@ -26,11 +26,13 @@ defmodule Meetcutes.Release do
   # Exposes seed file evaluation inside the production environment context
   def seed do
     load_app()
+
     for repo <- repos() do
-      {:ok, _, _} = Ecto.Migrator.with_repo(repo, fn _repo ->
-        # Evaluates your data seeds script over the active repo connection pool
-        Code.eval_file(Application.app_dir(@app, "priv/repo/seeds.exs"))
-      end)
+      {:ok, _, _} =
+        Ecto.Migrator.with_repo(repo, fn _repo ->
+          # Evaluates your data seeds script over the active repo connection pool
+          Code.eval_file(Application.app_dir(@app, "priv/repo/seeds.exs"))
+        end)
     end
   end
 

@@ -149,7 +149,9 @@ upsert = fn attrs ->
       around_user_count: Map.get(attrs, :around_user_count, 0),
       around_user_count_updated_at: Map.get(attrs, :around_user_count_updated_at),
       subscription_expires_at: Map.get(attrs, :subscription_expires_at),
-      stripe_customer_id: Map.get(attrs, :stripe_customer_id)
+      stripe_customer_id: Map.get(attrs, :stripe_customer_id),
+      password_retry_count: 0,
+      password_reset_pending: false
     )
 
   {:ok, updated} = Repo.update(changeset)

@@ -7,12 +7,15 @@ import Config
 # before starting your production server.
 config :meetcutes, MeetcutesWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
 
-# Configures Swoosh API Client
-config :swoosh, api_client: Swoosh.ApiClient.Req
+# Configures Swoosh API Client. The application supervision tree starts
+# `Meetcutes.Finch`, so Swoosh reuses that pool instead of opening another.
+config :swoosh,
+  api_client: Swoosh.ApiClient.Finch,
+  finch_name: Meetcutes.Finch
 
-# Production email is delivered through Resend's native HTTP API adapter.
+# Production email is delivered through Swoosh's native Resend adapter.
 # The API key is injected at runtime from RESEND_API_KEY in config/runtime.exs.
-config :meetcutes, Meetcutes.Mailer, adapter: Resend.Swoosh.Adapter
+config :meetcutes, Meetcutes.Mailer, adapter: Swoosh.Adapters.Resend
 
 # Disable Swoosh Local Memory Storage
 config :swoosh, local: false

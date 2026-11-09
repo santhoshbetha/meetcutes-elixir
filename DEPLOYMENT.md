@@ -433,6 +433,7 @@ Expected health payloads:
 | `STRIPE_SECRET_KEY` | billing | Stripe API |
 | `STRIPE_WEBHOOK_SECRET` | billing | Stripe webhook verification |
 | `RESEND_API_KEY` | yes | Transactional email |
+| `MAIL_FROM_EMAIL` | no | White-labeled sender (default `noreply@meetcutes.us`) |
 | `MCP_ADMIN_SECRET_KEY` | admin | `X-MCP-Admin-Key` gate |
 | `PHX_HOST` | yes | Public host for generated URLs |
 | `PORT` | yes | Internal container port (`4000`) |

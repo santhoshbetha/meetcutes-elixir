@@ -13,6 +13,9 @@ defmodule Meetcutes.Relationships do
   alias Meetcutes.Locations
   alias Meetcutes.Repo
   alias Meetcutes.Relationships.Relationship
+  alias Meetcutes.Workers.NotificationWorker
+
+  require Logger
 
   @kinds [:like, :block, :mute]
   @hidden_kinds [:block, :mute]
@@ -36,7 +39,9 @@ defmodule Meetcutes.Relationships do
          :ok <- ensure_not_self(actor_id, target_id),
          :ok <- ensure_target_exists(target_id),
          :ok <- ensure_like_allowed(actor_id, target_id, kind) do
-      do_create_relationship(actor_id, target_id, kind)
+      actor_id
+      |> do_create_relationship(target_id, kind)
+      |> handle_created_relationship(actor_id, target_id, kind)
     end
   end
 
@@ -212,7 +217,7 @@ defmodule Meetcutes.Relationships do
 
       case Repo.get_by(Relationship, actor_id: actor_id, target_id: target_id, kind: kind) do
         %Relationship{} = relationship ->
-          {:ok, relationship}
+          {:ok, {relationship, false}}
 
         nil ->
           %Relationship{}
@@ -222,8 +227,63 @@ defmodule Meetcutes.Relationships do
             kind: kind
           })
           |> Repo.insert()
+          |> case do
+            {:ok, relationship} -> {:ok, {relationship, true}}
+            {:error, changeset} -> {:error, changeset}
+          end
       end
     end)
+  end
+
+  defp handle_created_relationship({:ok, {relationship, true}}, actor_id, target_id, :like) do
+    maybe_enqueue_match_reminders(actor_id, target_id)
+    {:ok, relationship}
+  end
+
+  defp handle_created_relationship(
+         {:ok, {relationship, _inserted?}},
+         _actor_id,
+         _target_id,
+         _kind
+       ) do
+    {:ok, relationship}
+  end
+
+  defp handle_created_relationship({:error, _reason} = error, _actor_id, _target_id, _kind),
+    do: error
+
+  # The match is derived from mutual likes rather than stored as a separate row.
+  # Enqueue only after the like transaction commits, and only when the reverse
+  # like already exists, so a one-way like never sends a false reminder.
+  defp maybe_enqueue_match_reminders(actor_id, target_id) do
+    if Repo.exists?(
+         from r in Relationship,
+           where:
+             r.actor_id == ^target_id and r.target_id == ^actor_id and
+               r.kind == :like
+       ) do
+      enqueue_match_reminder(actor_id, target_id)
+      enqueue_match_reminder(target_id, actor_id)
+    end
+
+    :ok
+  end
+
+  defp enqueue_match_reminder(user_id, match_id) do
+    %{user_id: user_id, match_id: match_id, action: "match_reminder"}
+    |> NotificationWorker.new()
+    |> Oban.insert()
+    |> case do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Unable to enqueue match reminder for #{user_id} -> #{match_id}: #{inspect(reason)}"
+        )
+
+        :error
+    end
   end
 
   defp delete_pair(actor_id, target_id, kind) do

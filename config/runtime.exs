@@ -323,10 +323,10 @@ if config_env() == :prod do
   #
   # Gmail and Mailgun SMTP are retained only as explicit opt-in providers.
   resend_config = [
-    adapter: Resend.Swoosh.Adapter,
+    adapter: Swoosh.Adapters.Resend,
     api_key:
       get_env.("RESEND_API_KEY") ||
-        raise("RESEND_API_KEY environment variable is required for Resend")
+        raise("ENV missing: RESEND_API_KEY")
   ]
 
   gmail_config = fn ->
@@ -381,11 +381,15 @@ if config_env() == :prod do
 
   config :meetcutes, Meetcutes.Mailer, mailer_config
 
-  # Most non-SMTP adapters require an API client. Swoosh supports Req, Hackney,
-  # and Finch out-of-the-box. This configuration is typically done at
-  # compile-time in your config/prod.exs:
-  #
-  config :swoosh, :api_client, Swoosh.ApiClient.Req
+  # Global white-labeled sender used by every transactional template.
+  config :meetcutes, :from_email, get_env.("MAIL_FROM_EMAIL") || "noreply@meetcutes.us"
+
+  # Most non-SMTP adapters require an API client. Reuse the Finch pool already
+  # started by Meetcutes.Application instead of opening a second HTTP stack.
+  config :swoosh,
+    api_client: Swoosh.ApiClient.Finch,
+    finch_name: Meetcutes.Finch
+
   #
   # See https://hexdocs.pm/swoosh/Swoosh.html#module-installation for details.
 end

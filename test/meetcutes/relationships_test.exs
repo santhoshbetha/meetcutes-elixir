@@ -1,9 +1,11 @@
 defmodule Meetcutes.RelationshipsTest do
   use Meetcutes.DataCase
+  use Oban.Testing, repo: Meetcutes.Repo
 
   import Meetcutes.AccountsFixtures
 
   alias Meetcutes.Relationships
+  alias Meetcutes.Workers.NotificationWorker
 
   describe "create_relationship/3" do
     test "creates a like, block, and mute" do
@@ -134,6 +136,38 @@ defmodule Meetcutes.RelationshipsTest do
       summary = Relationships.summary(actor.id)
       assert Enum.sort(summary.likes) == Enum.sort([target.id, stranger.id])
       assert summary.matches == [target.id]
+    end
+  end
+
+  describe "match reminders" do
+    test "enqueues one reminder for each side when a mutual like is created" do
+      actor = user_fixture()
+      target = user_fixture()
+
+      assert {:ok, _} = Relationships.create_relationship(actor.id, target.id, "like")
+      refute_enqueued(worker: NotificationWorker)
+
+      assert {:ok, _} = Relationships.create_relationship(target.id, actor.id, "like")
+
+      assert_enqueued(
+        worker: NotificationWorker,
+        args: %{user_id: actor.id, match_id: target.id, action: "match_reminder"}
+      )
+
+      assert_enqueued(
+        worker: NotificationWorker,
+        args: %{user_id: target.id, match_id: actor.id, action: "match_reminder"}
+      )
+    end
+
+    test "does not enqueue for a repeated or one-way like" do
+      actor = user_fixture()
+      target = user_fixture()
+
+      assert {:ok, _} = Relationships.create_relationship(actor.id, target.id, "like")
+      assert {:ok, _} = Relationships.create_relationship(actor.id, target.id, "like")
+
+      refute_enqueued(worker: NotificationWorker)
     end
   end
 end

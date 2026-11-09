@@ -27,6 +27,10 @@ config :ex_aws, http_client: Meetcutes.ExAws.FinchClient
 # Configure custom mailer
 config :meetcutes, Meetcutes.Emails.Mailer, enabled: true
 
+# White-labeled transactional sender. Runtime can override this with
+# MAIL_FROM_EMAIL while keeping the same verified Resend domain.
+config :meetcutes, :from_email, "noreply@meetcutes.us"
+
 config :meetcutes,
   ecto_repos: [Meetcutes.Repo],
   generators: [timestamp_type: :utc_datetime]
