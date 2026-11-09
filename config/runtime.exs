@@ -231,6 +231,7 @@ if config_env() == :prod do
     pool_size: pool_size,
     # For machines with several cores, consider starting multiple pools of `pool_size`
     # pool_count: 4,
+    ssl: [verify: :verify_none],
     socket_options: [keepalive: true] ++ maybe_ipv6
 
   # Queue concurrency can be tuned per container without rebuilding the image.
