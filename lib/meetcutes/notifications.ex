@@ -139,6 +139,20 @@ defmodule Meetcutes.Notifications do
   Builds insertable admin-broadcast rows for the MCP notification command.
   """
   def build_admin_broadcasts(user_ids, title, body, metadata \\ %{}) do
+    build_broadcasts(user_ids, :admin_broadcast, title, body, metadata)
+  end
+
+  @doc """
+  Builds insertable event lifecycle rows for every attendee.
+
+  Event rows use the polymorphic `upcoming_event` type so the inbox can render
+  its event-specific presentation and deep-link to the event page.
+  """
+  def build_event_broadcasts(user_ids, title, body, metadata \\ %{}) do
+    build_broadcasts(user_ids, :upcoming_event, title, body, metadata)
+  end
+
+  defp build_broadcasts(user_ids, type, title, body, metadata) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     user_ids
@@ -148,7 +162,7 @@ defmodule Meetcutes.Notifications do
       %{
         id: Ecto.ULID.generate(),
         user_id: user_id,
-        type: :admin_broadcast,
+        type: type,
         title: title,
         body: body,
         is_read: false,
@@ -162,6 +176,8 @@ defmodule Meetcutes.Notifications do
   @doc """
   Batch-inserts prepared admin-broadcast rows.
   """
+  def insert_broadcast_entries([]), do: 0
+
   def insert_broadcast_entries(entries) when is_list(entries) do
     {count, _result} = Repo.insert_all(Notification, entries)
     count

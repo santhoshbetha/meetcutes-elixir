@@ -179,6 +179,58 @@ defmodule MeetcutesWeb.EventsController do
   end
 
   @doc """
+  PATCH /api/v1/events/:id
+
+  Updates an owned event and notifies every attendee atomically.
+  """
+  def update(conn, %{"id" => id} = params) do
+    user = conn.assigns.current_user
+
+    case Events.update_event_for_owner(user, id, params) do
+      {:ok, event} ->
+        blocked_ids = Relationships.blocked_ids(user.id)
+        counts = Events.gender_counts([event.id]) |> Map.get(event.id, %{})
+
+        conn
+        |> put_status(:ok)
+        |> json(%{
+          status: "success",
+          data: %{event: EventJSON.event(event, blocked_ids, counts)}
+        })
+
+      {:error, reason} ->
+        MeetcutesWeb.FallbackController.call(conn, {:error, reason})
+    end
+  end
+
+  @doc """
+  DELETE /api/v1/events/:id
+
+  Cancels an owned event, preserves the row for the organizer, clears the
+  attendance projection, and notifies every registered attendee.
+  """
+  def delete(conn, %{"id" => id}) do
+    user = conn.assigns.current_user
+
+    case Events.cancel_event_for_owner(user, id) do
+      {:ok, event} ->
+        blocked_ids = Relationships.blocked_ids(user.id)
+        counts = Events.gender_counts([event.id]) |> Map.get(event.id, %{})
+
+        conn
+        |> put_status(:ok)
+        |> json(%{
+          status: "success",
+          message: "Event canceled",
+          data: %{event: EventJSON.event(event, blocked_ids, counts)}
+        })
+
+      {:error, reason} ->
+        MeetcutesWeb.FallbackController.call(conn, {:error, reason})
+    end
+  end
+
+  @doc """
   POST /api/v1/events/:id/join
 
   Adds the bearer user to the attendee list. The request body may contain the

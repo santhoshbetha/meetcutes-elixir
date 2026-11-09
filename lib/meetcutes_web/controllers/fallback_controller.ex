@@ -199,6 +199,17 @@ defmodule MeetcutesWeb.FallbackController do
     })
   end
 
+  def call(conn, {:error, :forbidden_event_owner}) do
+    conn
+    |> put_status(:forbidden)
+    |> json(%{
+      status: "error",
+      code: "forbidden",
+      message: "Only the event creator can modify this event",
+      errors: ["You are not the creator of this event."]
+    })
+  end
+
   def call(conn, {:error, :blocked}) do
     conn
     |> put_status(:forbidden)

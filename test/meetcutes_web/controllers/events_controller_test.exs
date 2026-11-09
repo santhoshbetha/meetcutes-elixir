@@ -527,6 +527,170 @@ defmodule MeetcutesWeb.EventsControllerTest do
     end
   end
 
+  describe "PATCH /api/v1/events/:id" do
+    test "updates an owned event and broadcasts an attendee notification", %{
+      conn: conn,
+      user: user
+    } do
+      location = location_fixture()
+      event = event_fixture(user, location, future_datetime(7, 8))
+      attendee = user_fixture() |> with_identity("update_attendee")
+      {:ok, _} = Events.join_event(event.id, attendee)
+      :ok = MeetcutesWeb.Endpoint.subscribe("user_notifications:#{attendee.id}")
+
+      conn =
+        patch(
+          conn,
+          ~p"/api/v1/events/#{event.id}",
+          Map.merge(event_params(Date.add(Date.utc_today(), 8), "09:00", "11:00"), %{
+            "title" => "Updated Event Title",
+            "location" => "Updated Venue",
+            "description" => "Updated logistics"
+          })
+        )
+
+      assert %{"status" => "success", "data" => %{"event" => updated}} =
+               json_response(conn, 200)
+
+      assert updated["title"] == "Updated Event Title"
+      assert updated["location"]["name"] == "Updated Venue"
+      assert updated["event_date"] == Date.to_iso8601(Date.add(Date.utc_today(), 8))
+
+      assert_receive %Phoenix.Socket.Broadcast{
+                       topic: topic,
+                       event: "new_notification",
+                       payload: payload
+                     },
+                     500
+
+      assert topic == "user_notifications:#{attendee.id}"
+      assert payload.type == "upcoming_event"
+      assert payload.title == "Event updated: Updated Event Title"
+      assert payload.body =~ "updated its logistics"
+      assert payload.metadata["event_id"] == event.id
+
+      assert Repo.get_by(Meetcutes.Notifications.Notification,
+               user_id: attendee.id,
+               type: :upcoming_event
+             )
+    end
+
+    test "returns 403 for a non-owner and does not mutate the event", %{
+      conn: conn,
+      user: _actor
+    } do
+      owner = user_fixture() |> with_identity("event_owner_guard")
+      location = location_fixture()
+      event = event_fixture(owner, location, future_datetime(7, 8))
+
+      conn =
+        patch(
+          conn,
+          ~p"/api/v1/events/#{event.id}",
+          Map.merge(event_params(Date.add(Date.utc_today(), 8), "09:00", "11:00"), %{
+            "title" => "Unauthorized Title"
+          })
+        )
+
+      assert %{"status" => "error", "code" => "forbidden"} =
+               json_response(conn, 403)
+
+      assert Events.get_event(event.id).title == event.title
+    end
+
+    test "rejects an invalid update window without inserting notifications", %{
+      conn: conn,
+      user: user
+    } do
+      location = location_fixture()
+      event = event_fixture(user, location, future_datetime(7, 8))
+      attendee = user_fixture() |> with_identity("invalid_window_attendee")
+      {:ok, _} = Events.join_event(event.id, attendee)
+
+      conn =
+        patch(
+          conn,
+          ~p"/api/v1/events/#{event.id}",
+          event_params(Date.add(Date.utc_today(), 8), "10:00", "09:00")
+        )
+
+      assert %{"errors" => errors} = json_response(conn, 422)
+      assert errors["end_time"]
+
+      assert Repo.aggregate(
+               from(n in Meetcutes.Notifications.Notification,
+                 where: n.user_id == ^attendee.id
+               ),
+               :count,
+               :id
+             ) == 0
+
+      assert Events.get_event(event.id).title == event.title
+    end
+  end
+
+  describe "DELETE /api/v1/events/:id" do
+    test "cancels an owned event, clears attendance, and alerts every attendee", %{
+      conn: conn,
+      user: user
+    } do
+      location = location_fixture()
+      event = event_fixture(user, location, future_datetime(7, 8))
+      attendee = user_fixture() |> with_identity("cancel_attendee")
+      {:ok, _} = Events.join_event(event.id, attendee)
+      :ok = MeetcutesWeb.Endpoint.subscribe("user_notifications:#{attendee.id}")
+
+      conn = delete(conn, ~p"/api/v1/events/#{event.id}")
+
+      assert %{
+               "status" => "success",
+               "message" => "Event canceled",
+               "data" => %{"event" => canceled}
+             } = json_response(conn, 200)
+
+      assert canceled["status"] == "CANCELLED"
+      assert canceled["attendees"] == []
+
+      stored = Events.get_event(event.id)
+      assert stored.status == "CANCELLED"
+      assert stored.attendees == %{}
+
+      assert_receive %Phoenix.Socket.Broadcast{
+                       topic: topic,
+                       event: "new_notification",
+                       payload: payload
+                     },
+                     500
+
+      assert topic == "user_notifications:#{attendee.id}"
+      assert payload.type == "upcoming_event"
+      assert payload.title == "Event canceled: #{event.title}"
+      assert payload.body =~ "has been canceled by the organizer"
+      assert payload.metadata["event_id"] == event.id
+
+      assert Repo.get_by(Meetcutes.Notifications.Notification,
+               user_id: attendee.id,
+               type: :upcoming_event
+             )
+    end
+
+    test "returns 403 for a non-owner and keeps the event published", %{
+      conn: conn,
+      user: _actor
+    } do
+      owner = user_fixture() |> with_identity("cancel_owner_guard")
+      location = location_fixture()
+      event = event_fixture(owner, location, future_datetime(7, 8))
+
+      conn = delete(conn, ~p"/api/v1/events/#{event.id}")
+
+      assert %{"status" => "error", "code" => "forbidden"} =
+               json_response(conn, 403)
+
+      assert Events.get_event(event.id).status == "PUBLISHED"
+    end
+  end
+
   defp event_params(date, start_time, end_time) do
     %{
       "title" => "Coffee Meetup",

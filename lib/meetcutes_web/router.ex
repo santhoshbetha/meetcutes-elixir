@@ -199,8 +199,10 @@ defmodule MeetcutesWeb.Router do
     get "/v1/events/:event_id/check-fatigue", EventsController, :check_fatigue
     post "/v1/events", EventsController, :create
     get "/v1/events/:id", EventsController, :show
+    patch "/v1/events/:id", EventsController, :update
     post "/v1/events/:id/join", EventsController, :join
     delete "/v1/events/:id/join", EventsController, :leave
+    delete "/v1/events/:id", EventsController, :delete
   end
 
   defp dashboard_basic_auth(conn, _opts) do

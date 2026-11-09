@@ -12,6 +12,7 @@ defmodule Meetcutes.Events do
   alias Meetcutes.Events.Location
   alias Meetcutes.Events.Notifications
   alias Meetcutes.Locations
+  alias Meetcutes.Notifications, as: InboxNotifications
 
   @max_event_distance_miles 150
 
@@ -47,7 +48,7 @@ defmodule Meetcutes.Events do
   end
 
   defp apply_date_filter(query, %{"dateFrom" => date_from, "dateTo" => date_to}) do
-    # CORRECCIÓN: Usar NaiveDateTime.new! correctamente
+    # CORRECCIÃ“N: Usar NaiveDateTime.new! correctamente
     start_date = NaiveDateTime.new!(Date.from_iso8601!(date_from), ~T[00:00:00])
     end_date = NaiveDateTime.new!(Date.from_iso8601!(date_to), ~T[23:59:59])
 
@@ -738,7 +739,7 @@ defmodule Meetcutes.Events do
         Notifications.notify_event_updated(new_event)
 
       _ ->
-        # Solo cambió internal_notes, no el status
+        # Solo cambiÃ³ internal_notes, no el status
         if old_event.internal_notes != new_event.internal_notes do
           Notifications.notify_event_updated(new_event)
         else
@@ -796,6 +797,303 @@ defmodule Meetcutes.Events do
   """
   def delete_event(%Event{} = event) do
     Repo.delete(event)
+  end
+
+  @doc """
+  Updates an event only when the bearer user owns it.
+
+  The event row, its location projection, and every attendee notification row
+  are committed atomically. Channel broadcasts happen after the transaction
+  commits.
+  """
+  def update_event_for_owner(%User{} = user, event_id, params) when is_map(params) do
+    Repo.transaction(fn ->
+      event = fetch_event_for_owner!(event_id, user)
+
+      with {:ok, attrs} <- owner_update_attrs(event, params),
+           {:ok, updated} <- apply_owner_update(event, attrs) do
+        updated = Repo.preload(updated, :location, force: true)
+
+        entries =
+          if owner_update_changed?(event, updated) do
+            updated
+            |> build_attendee_notifications(
+              "Event updated: #{updated.title}",
+              "Notice: The event '#{updated.title}' has updated its logistics (Date/Time or Venue). Please check the event page for details.",
+              "updated"
+            )
+          else
+            []
+          end
+
+        InboxNotifications.insert_broadcast_entries(entries)
+        {updated, entries}
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:ok, {updated, entries}} ->
+        InboxNotifications.broadcast_entries(entries)
+        {:ok, updated}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Cancels an event only when the bearer user owns it.
+
+  Attendee ids are captured before the attendance projection is cleared. The
+  cancellation rows and the event update commit in one transaction, then the
+  persisted notifications broadcast to each attendee's personal topic.
+  """
+  def cancel_event_for_owner(%User{} = user, event_id) do
+    Repo.transaction(fn ->
+      event = fetch_event_for_owner!(event_id, user)
+
+      entries =
+        InboxNotifications.build_event_broadcasts(
+          attendee_ids_for_event(event),
+          "Event canceled: #{event.title}",
+          "Alert: The upcoming event '#{event.title}' has been canceled by the organizer.",
+          %{
+            "event_id" => event.id,
+            "event_title" => event.title,
+            "kind" => "canceled"
+          }
+        )
+
+      InboxNotifications.insert_broadcast_entries(entries)
+
+      case event
+           |> Ecto.Changeset.change(%{
+             status: "CANCELLED",
+             attendees: %{},
+             attendees_count: 0
+           })
+           |> Repo.update() do
+        {:ok, cancelled} ->
+          {Repo.preload(cancelled, :location, force: true), entries}
+
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
+    end)
+    |> case do
+      {:ok, {updated, entries}} ->
+        InboxNotifications.broadcast_entries(entries)
+        {:ok, updated}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns the ids of every user registered for an event.
+
+  The v1 attendance projection is the `events.attendees` map. Legacy users may
+  still carry the event id in `registered_events`, so those ids are unioned in
+  without double-notifying anyone.
+  """
+  def attendee_ids_for_event(%Event{} = event) do
+    projected_ids =
+      event.attendees
+      |> Kernel.||(%{})
+      |> Map.keys()
+      |> Enum.reject(&is_nil/1)
+
+    legacy_ids =
+      Repo.all(
+        from u in User,
+          where: not is_nil(u.registered_events),
+          where:
+            fragment(
+              "EXISTS (SELECT 1 FROM unnest(?) AS elem WHERE elem->>'event_id' = ?)",
+              u.registered_events,
+              ^event.id
+            ),
+          select: u.id
+      )
+
+    Enum.uniq(projected_ids ++ legacy_ids)
+  end
+
+  defp fetch_event_for_owner!(event_id, %User{} = user) do
+    case Repo.get(Event, event_id) do
+      nil ->
+        Repo.rollback(:event_not_found)
+
+      event ->
+        event = Repo.preload(event, :location, force: true)
+
+        if event.created_by != user.id do
+          Repo.rollback(:forbidden_event_owner)
+        end
+
+        event
+    end
+  end
+
+  defp owner_update_attrs(event, params) do
+    with {:ok, location} <- update_event_location(event, params) do
+      case owner_event_times(event, params) do
+        {:ok, start_at, end_at, event_date} ->
+          attrs = %{
+            "title" => params["title"] || event.title,
+            "content" => params["content"] || params["description"] || event.content,
+            "location_id" => location.id,
+            "start_at" => start_at,
+            "end_at" => end_at,
+            "event_date" => event_date
+          }
+
+          {:ok, Map.merge(attrs, owner_age_attrs(params))}
+
+        :error ->
+          {:error, :invalid_time_range}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  defp update_event_location(%Event{location: %Location{} = location}, params) do
+    nested = if is_map(params["location"]), do: params["location"], else: %{}
+
+    attrs =
+      %{
+        name: first_string([nested["name"], params["location"], params["location_name"]]),
+        street:
+          first_string([
+            nested["street"],
+            nested["address1"],
+            params["address1"],
+            params["street"]
+          ]),
+        locality:
+          first_string([nested["locality"], nested["city"], params["city"], params["locality"]]),
+        state: first_string([nested["state"], params["state"]]),
+        postal_code:
+          first_string([
+            nested["postal_code"],
+            nested["zipcode"],
+            params["zipcode"],
+            params["zip"]
+          ]),
+        latitude: first_number([nested["latitude"], params["eventlat"], params["latitude"]]),
+        longitude: first_number([nested["longitude"], params["eventlng"], params["longitude"]])
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    Locations.update_location(location, attrs)
+  end
+
+  defp update_event_location(%Event{}, params), do: resolve_event_location(params)
+
+  defp owner_event_times(event, params) do
+    if is_binary(params["start_at"]) and is_binary(params["end_at"]) do
+      with {:ok, start_at} <- parse_datetime(params["start_at"]),
+           {:ok, end_at} <- parse_datetime(params["end_at"]),
+           :ok <- validate_window(start_at, end_at) do
+        {:ok, start_at, end_at, DateTime.to_date(start_at)}
+      end
+    else
+      date =
+        params["eventdate"] || params["event_date"] || event.event_date ||
+          DateTime.to_date(event.start_at)
+
+      start_time = params["start_time"] || params["starttime"] || DateTime.to_time(event.start_at)
+      end_time = params["end_time"] || params["endtime"] || DateTime.to_time(event.end_at)
+
+      with {:ok, date} <- parse_date(date),
+           {:ok, start_time} <- parse_time(start_time),
+           {:ok, end_time} <- parse_time(end_time),
+           {:ok, start_at} <- combine(date, start_time),
+           {:ok, end_at} <- combine(date, end_time),
+           :ok <- validate_window(start_at, end_at) do
+        {:ok, start_at, end_at, date}
+      end
+    end
+  end
+
+  defp owner_age_attrs(params) do
+    if Map.has_key?(params, "has_age_restriction") do
+      if truthy_param(params["has_age_restriction"]) do
+        %{
+          "has_age_restriction" => true,
+          "men_min_age" => params["men_min_age"],
+          "men_max_age" => params["men_max_age"],
+          "women_min_age" => params["women_min_age"],
+          "women_max_age" => params["women_max_age"]
+        }
+      else
+        %{
+          "has_age_restriction" => false,
+          "men_min_age" => nil,
+          "men_max_age" => nil,
+          "women_min_age" => nil,
+          "women_max_age" => nil
+        }
+      end
+    else
+      %{}
+    end
+  end
+
+  defp apply_owner_update(event, attrs) do
+    event
+    |> Event.changeset(attrs)
+    |> Repo.update()
+  end
+
+  defp owner_update_changed?(old_event, updated_event) do
+    event_fields = [
+      :title,
+      :content,
+      :start_at,
+      :end_at,
+      :event_date,
+      :location_id,
+      :has_age_restriction,
+      :men_min_age,
+      :men_max_age,
+      :women_min_age,
+      :women_max_age
+    ]
+
+    location_fields = [
+      :name,
+      :street,
+      :locality,
+      :state,
+      :postal_code,
+      :latitude,
+      :longitude
+    ]
+
+    Enum.any?(event_fields, &(Map.get(old_event, &1) != Map.get(updated_event, &1))) or
+      Enum.any?(
+        location_fields,
+        &(Map.get(old_event.location || %{}, &1) != Map.get(updated_event.location || %{}, &1))
+      )
+  end
+
+  defp build_attendee_notifications(event, title, body, kind) do
+    InboxNotifications.build_event_broadcasts(
+      attendee_ids_for_event(event),
+      title,
+      body,
+      %{
+        "event_id" => event.id,
+        "event_title" => event.title,
+        "kind" => kind
+      }
+    )
   end
 
   @doc """
