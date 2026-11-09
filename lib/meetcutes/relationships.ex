@@ -20,6 +20,8 @@ defmodule Meetcutes.Relationships do
   @kinds [:like, :block, :mute]
   @hidden_kinds [:block, :mute]
   @like_distance_miles 100
+  @default_per_page 20
+  @max_per_page 20
 
   @doc """
   Returns the relationship kinds the API accepts.
@@ -35,6 +37,22 @@ defmodule Meetcutes.Relationships do
   """
   def create_relationship(actor_id, target_id, kind)
       when is_binary(actor_id) and is_binary(target_id) do
+    case create_relationship_with_status(actor_id, target_id, kind) do
+      {:ok, relationship, _inserted?} -> {:ok, relationship}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def create_relationship(_actor_id, _target_id, _kind), do: {:error, :invalid_relationship}
+
+  @doc """
+  Creates a relationship and reports whether the row was newly inserted.
+
+  Controllers use the third tuple element to avoid duplicating side effects
+  (such as a like notification) when the client repeats an idempotent request.
+  """
+  def create_relationship_with_status(actor_id, target_id, kind)
+      when is_binary(actor_id) and is_binary(target_id) do
     with {:ok, kind} <- cast_kind(kind),
          :ok <- ensure_not_self(actor_id, target_id),
          :ok <- ensure_target_exists(target_id),
@@ -45,7 +63,8 @@ defmodule Meetcutes.Relationships do
     end
   end
 
-  def create_relationship(_actor_id, _target_id, _kind), do: {:error, :invalid_relationship}
+  def create_relationship_with_status(_actor_id, _target_id, _kind),
+    do: {:error, :invalid_relationship}
 
   @doc """
   Removes a directed relationship. Idempotent: deleting something that does not
@@ -139,6 +158,35 @@ defmodule Meetcutes.Relationships do
   end
 
   def list_liked_by_users(_user_id), do: []
+
+  @doc """
+  Returns a bounded page of profiles the actor liked within 100 miles.
+
+  Pages are capped at 20 cards so a large interaction history never streams
+  the entire shortlist to the client.
+  """
+  def list_liked_users_paginated(user_id, opts \\ [])
+
+  def list_liked_users_paginated(user_id, opts) when is_binary(user_id) do
+    user_id
+    |> proximity_likes(:outgoing)
+    |> paginate_proximity(opts)
+  end
+
+  def list_liked_users_paginated(_user_id, opts), do: empty_proximity_page(opts)
+
+  @doc """
+  Returns a bounded page of profiles who liked the actor within 100 miles.
+  """
+  def list_liked_by_users_paginated(user_id, opts \\ [])
+
+  def list_liked_by_users_paginated(user_id, opts) when is_binary(user_id) do
+    user_id
+    |> proximity_likes(:incoming)
+    |> paginate_proximity(opts)
+  end
+
+  def list_liked_by_users_paginated(_user_id, opts), do: empty_proximity_page(opts)
 
   @doc """
   Returns the IDs blocked in either direction for the given viewer.
@@ -237,16 +285,16 @@ defmodule Meetcutes.Relationships do
 
   defp handle_created_relationship({:ok, {relationship, true}}, actor_id, target_id, :like) do
     maybe_enqueue_match_reminders(actor_id, target_id)
-    {:ok, relationship}
+    {:ok, relationship, true}
   end
 
   defp handle_created_relationship(
-         {:ok, {relationship, _inserted?}},
+         {:ok, {relationship, inserted?}},
          _actor_id,
          _target_id,
          _kind
        ) do
-    {:ok, relationship}
+    {:ok, relationship, inserted?}
   end
 
   defp handle_created_relationship({:error, _reason} = error, _actor_id, _target_id, _kind),
@@ -327,7 +375,7 @@ defmodule Meetcutes.Relationships do
           _ -> []
         end
       end)
-      |> Enum.sort_by(& &1.distance_miles)
+      |> Enum.sort_by(&{&1.distance_miles, &1.user.id})
     else
       _ -> []
     end
@@ -383,6 +431,63 @@ defmodule Meetcutes.Relationships do
         select: u
     )
   end
+
+  defp paginate_proximity(entries, opts) do
+    page = opts |> Keyword.get(:page, 1) |> normalize_positive(1)
+    per_page = opts |> Keyword.get(:per_page, @default_per_page) |> normalize_per_page()
+
+    total = length(entries)
+    total_pages = total_pages(total, per_page)
+
+    users =
+      entries
+      |> Enum.drop((page - 1) * per_page)
+      |> Enum.take(per_page)
+
+    %{
+      users: users,
+      pagination: %{
+        page: page,
+        per_page: per_page,
+        total: total,
+        total_pages: total_pages,
+        has_next_page: page < total_pages
+      }
+    }
+  end
+
+  defp empty_proximity_page(opts) do
+    %{
+      users: [],
+      pagination: %{
+        page: normalize_positive(Keyword.get(opts, :page, 1), 1),
+        per_page: opts |> Keyword.get(:per_page, @default_per_page) |> normalize_per_page(),
+        total: 0,
+        total_pages: 0,
+        has_next_page: false
+      }
+    }
+  end
+
+  defp normalize_positive(value, _default) when is_integer(value) and value > 0, do: value
+
+  defp normalize_positive(value, default) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {parsed, ""} when parsed > 0 -> parsed
+      _ -> default
+    end
+  end
+
+  defp normalize_positive(_value, default), do: default
+
+  defp normalize_per_page(value) do
+    value
+    |> normalize_positive(@default_per_page)
+    |> min(@max_per_page)
+  end
+
+  defp total_pages(0, _per_page), do: 0
+  defp total_pages(total, per_page), do: div(total + per_page - 1, per_page)
 
   defp cast_kind(kind) when kind in @kinds, do: {:ok, kind}
 

@@ -1,9 +1,11 @@
 defmodule MeetcutesWeb.RelationshipsControllerTest do
   use MeetcutesWeb.ConnCase, async: false
 
+  import Ecto.Query
   import Meetcutes.AccountsFixtures
 
   alias Meetcutes.Accounts
+  alias Meetcutes.Notifications.Notification
   alias Meetcutes.Relationships
   alias Meetcutes.Repo
 
@@ -36,6 +38,62 @@ defmodule MeetcutesWeb.RelationshipsControllerTest do
 
       assert target_id == target.id
       assert likes == [target.id]
+    end
+
+    test "creates a profile_like notification and broadcasts it to the target", %{
+      conn: conn,
+      user: user
+    } do
+      user =
+        user
+        |> Ecto.Changeset.change(nickname: "notifier_actor")
+        |> Repo.update!()
+
+      target = user_fixture(%{first_name: "Notified"})
+      :ok = MeetcutesWeb.Endpoint.subscribe("user_notifications:#{target.id}")
+
+      conn =
+        post(conn, ~p"/api/v1/relationships", %{
+          "kind" => "like",
+          "target_id" => target.id
+        })
+
+      assert %{"status" => "success"} = json_response(conn, 201)
+
+      assert_receive %Phoenix.Socket.Broadcast{
+                       topic: topic,
+                       event: "new_notification",
+                       payload: payload
+                     },
+                     500
+
+      assert topic == "user_notifications:#{target.id}"
+      assert payload.type == "profile_like"
+      assert payload.title == "Someone liked your profile"
+      assert payload.metadata["sender_id"] == user.id
+      assert payload.metadata["sender_handle"] == "notifier_actor"
+    end
+
+    test "does not duplicate the like notification on a repeated request", %{conn: conn} do
+      target = user_fixture()
+
+      for _attempt <- 1..2 do
+        conn =
+          post(conn, ~p"/api/v1/relationships", %{
+            "kind" => "like",
+            "target_id" => target.id
+          })
+
+        assert %{"status" => "success"} = json_response(conn, 201)
+      end
+
+      assert Repo.aggregate(
+               from(n in Notification,
+                 where: n.user_id == ^target.id and n.type == :profile_like
+               ),
+               :count,
+               :id
+             ) == 1
     end
 
     test "creates a block and removes mutual likes", %{conn: conn, user: user} do
@@ -233,6 +291,45 @@ defmodule MeetcutesWeb.RelationshipsControllerTest do
       liked_by = json_response(get(conn, ~p"/api/v1/relationships/liked-by"), 200)
 
       assert liked_by["data"]["users"] == []
+    end
+
+    test "paginates liked profiles at twenty per page", %{conn: conn, user: user} do
+      viewer =
+        user
+        |> Ecto.Changeset.change(geohash: Geohash.encode(30.2672, -97.7431, 9))
+        |> Repo.update!()
+
+      fans =
+        for index <- 1..21 do
+          user_fixture(%{first_name: "Fan#{index}"})
+          |> with_geohash(30.2672, -97.5)
+        end
+
+      Enum.each(fans, fn fan ->
+        assert {:ok, _} = Relationships.create_relationship(viewer.id, fan.id, "like")
+      end)
+
+      first_page =
+        json_response(
+          get(conn, ~p"/api/v1/relationships/liked?page=1&per_page=20"),
+          200
+        )
+
+      assert length(first_page["data"]["users"]) == 20
+      assert first_page["data"]["pagination"]["page"] == 1
+      assert first_page["data"]["pagination"]["per_page"] == 20
+      assert first_page["data"]["pagination"]["total"] == 21
+      assert first_page["data"]["pagination"]["total_pages"] == 2
+      assert first_page["data"]["pagination"]["has_next_page"] == true
+
+      second_page =
+        json_response(
+          get(conn, ~p"/api/v1/relationships/liked?page=2&per_page=20"),
+          200
+        )
+
+      assert length(second_page["data"]["users"]) == 1
+      assert second_page["data"]["pagination"]["has_next_page"] == false
     end
   end
 

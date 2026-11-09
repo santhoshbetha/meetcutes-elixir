@@ -1,6 +1,9 @@
 defmodule MeetcutesWeb.RelationshipsController do
   use MeetcutesWeb, :controller
 
+  require Logger
+
+  alias Meetcutes.Notifications
   alias Meetcutes.Relationships
   alias MeetcutesWeb.UserJSON
 
@@ -24,28 +27,37 @@ defmodule MeetcutesWeb.RelationshipsController do
 
   Returns the active profiles the bearer user liked within 100 miles.
   """
-  def liked(conn, _params), do: proximity_directory(conn, :liked)
+  def liked(conn, params), do: proximity_directory(conn, :liked, params)
 
   @doc """
   GET /api/v1/relationships/liked-by
 
   Returns the active profiles who liked the bearer user within 100 miles.
   """
-  def liked_by(conn, _params), do: proximity_directory(conn, :liked_by)
+  def liked_by(conn, params), do: proximity_directory(conn, :liked_by, params)
 
-  defp proximity_directory(conn, kind) do
+  defp proximity_directory(conn, kind, params) do
     user = conn.assigns.current_user
 
-    entries =
+    result =
       case kind do
-        :liked -> Relationships.list_liked_users(user.id)
-        :liked_by -> Relationships.list_liked_by_users(user.id)
+        :liked ->
+          Relationships.list_liked_users_paginated(user.id,
+            page: params["page"],
+            per_page: params["per_page"]
+          )
+
+        :liked_by ->
+          Relationships.list_liked_by_users_paginated(user.id,
+            page: params["page"],
+            per_page: params["per_page"]
+          )
       end
 
     label = if kind == :liked, do: "liked", else: "liked_by"
 
     users =
-      Enum.map(entries, fn %{user: liked_user, distance_miles: distance} ->
+      Enum.map(result.users, fn %{user: liked_user, distance_miles: distance} ->
         liked_user
         |> UserJSON.public_profile()
         |> Map.put(:distance_miles, distance)
@@ -57,7 +69,8 @@ defmodule MeetcutesWeb.RelationshipsController do
       status: "success",
       data: %{
         kind: label,
-        users: users
+        users: users,
+        pagination: result.pagination
       }
     })
   end
@@ -108,8 +121,10 @@ defmodule MeetcutesWeb.RelationshipsController do
     kind = params["kind"]
     target_id = params["target_id"] || params["user_id"] || params["targetId"]
 
-    case Relationships.create_relationship(actor.id, target_id, kind) do
-      {:ok, relationship} ->
+    case Relationships.create_relationship_with_status(actor.id, target_id, kind) do
+      {:ok, relationship, inserted?} ->
+        notify_like(actor, relationship, inserted?)
+
         conn
         |> put_status(:created)
         |> json(%{
@@ -125,6 +140,33 @@ defmodule MeetcutesWeb.RelationshipsController do
         MeetcutesWeb.FallbackController.call(conn, {:error, reason})
     end
   end
+
+  defp notify_like(_actor, _relationship, false), do: :ok
+
+  defp notify_like(actor, %{kind: :like, target_id: target_id}, true) do
+    attrs = %{
+      user_id: target_id,
+      type: :profile_like,
+      title: "Someone liked your profile",
+      body: "A nearby member added you to their shortlist. See who is interested.",
+      metadata: %{
+        "sender_id" => actor.id,
+        "sender_handle" => actor.nickname
+      }
+    }
+
+    case Notifications.create_notification(attrs) do
+      {:ok, _notification} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Unable to create like notification for #{target_id}: #{inspect(reason)}")
+
+        :error
+    end
+  end
+
+  defp notify_like(_actor, _relationship, true), do: :ok
 
   @doc """
   DELETE /api/v1/relationships/:kind/:target_id
