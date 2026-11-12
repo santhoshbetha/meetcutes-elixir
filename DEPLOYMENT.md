@@ -1,553 +1,293 @@
-# MCP Administration
+# MeetCutes Deployment Guide
 
-The MCP command API replaces a standalone web admin panel.
+This guide covers the production topology for the MeetCutes platform:
 
-## Required environment
+- **Frontend:** React/Vite bundle on Cloudflare Pages/Workers via Wrangler.
+- **API:** Elixir/Phoenix release in Docker, orchestrated by Kamal 2.
+- **Database:** PostgreSQL 16 with PostGIS.
+- **Background jobs:** Oban.
+- **Email:** Swoosh with the Resend HTTP adapter.
+- **Media:** Cloudflare R2 (or any S3-compatible bucket).
+- **Payments:** Stripe Checkout, Customer Portal, and signed webhooks.
+- **Edge proxy/TLS:** `kamal-proxy`.
 
-```env
-MCP_ADMIN_SECRET_KEY=replace_with_a_long_random_secret
-PAYMENT_FEATURE_ENABLED=true
-MAINTENANCE_MODE_ACTIVE=false
-```
+No credentials belong in this repository. Keep production values in `.kamal/secrets`, the platform secret store, or the CI/CD environment.
 
-`MCP_ADMIN_SECRET_KEY` is independent from user bearer tokens. Requests must send
-it in the `X-MCP-Admin-Key` header. If the key is missing or incorrect, the
-endpoint returns `401 Unauthorized` before touching application state.
-
-## Endpoint
-
-```text
-POST /api/v1/admin/mcp-action
-Content-Type: application/json
-X-MCP-Admin-Key: <MCP_ADMIN_SECRET_KEY>
-```
-
-## Actions
-
-### `get_system_stats`
-
-Returns active users, total events, active Stripe subscriptions, and the Oban
-failure backlog.
-
-```json
-{ "action": "get_system_stats" }
-```
-
-### `toggle_maintenance`
-
-```json
-{ "action": "toggle_maintenance", "params": { "value": true } }
-```
-
-### `toggle_paywall`
-
-```json
-{ "action": "toggle_paywall", "params": { "value": false } }
-```
-
-Both toggles update runtime configuration on the running node. In a
-single-container deployment this changes behavior immediately without a
-rebuild.
-
-### `update_user_status`
-
-Accepts a `user_id` or `email`, plus `user_state`:
-
-```json
-{
-  "action": "update_user_status",
-  "params": { "email": "member@example.com", "user_state": "suspended" }
-}
-```
-
-Supported states: `active`, `inactive`, `suspended`, `delete`.
-
-- `active` clears manual locks and restores access.
-- `inactive`, `suspended`, and `delete` deactivate the account and revoke all
-  stored session tokens.
-- The update and token revocation are committed atomically.
-
-### `force_match_count`
-
-```json
-{
-  "action": "force_match_count",
-  "params": { "user_id": "01J...", "count": 250 }
-}
-```
-
-Sets `around_user_count` and its refresh timestamp directly, which is useful for
-testing paywall thresholds.
-
-### `push_notification`
-
-Supports three target scopes:
-
-```json
-{
-  "action": "push_notification",
-  "params": {
-    "target_scope": "all",
-    "title": "Weekend meetup",
-    "body": "A new gathering is happening near you."
-  }
-}
-```
-
-- `all` targets every active profile.
-- `user` accepts `email` or `user_handle`.
-- `area` accepts `center_lat`, `center_lng`, and `radius_miles`.
-
-Rows are inserted atomically, then each user's `user_notifications:<user_id>`
-Phoenix topic receives a `new_notification` event.
-
-### `set_global_announcement`
-
-```json
-{
-  "action": "set_global_announcement",
-  "params": {
-    "message": "Holiday giveaway: premium discovery is free this week."
-  }
-}
-```
-
-Sending an empty string or `null` clears the public banner. The public endpoint
-is:
+## 1. Production topology
 
 ```text
-GET /api/v1/public/global-announcement
+Browser
+  |
+  | HTTPS
+  v
+Cloudflare Pages/Workers (frontend)
+  |
+  | HTTPS + WebSocket
+  v
+kamal-proxy (TLS, health checks)
+  |
+  v
+Phoenix API container (Docker, non-root)
+  |-- PostgreSQL 16 + PostGIS
+  |-- Oban queues
+  |-- Resend email
+  |-- Cloudflare R2 / S3
+  |-- Stripe API + webhooks
 ```
 
-It returns either `{"message":"..."}` or `{"message":null}`.
+DNS:
 
-## Node.js MCP tool mapping
+- `meetcutes.us` and `www.meetcutes.us` → Cloudflare frontend.
+- `api.meetcutes.us` → the Kamal server and `kamal-proxy`.
 
-Use `mcp-config.json` as the tool definition. The server-side handler should:
+## 2. Prerequisites
 
-1. Read `MEETCUTES_API_URL` and `MCP_ADMIN_SECRET_KEY` from its own environment.
-2. POST the MCP arguments to `/api/v1/admin/mcp-action`.
-3. Forward the JSON result as the tool response.
-4. Never expose `MCP_ADMIN_SECRET_KEY` to the browser or LLM prompt.
-
-Example handler:
-
-```js
-async function manageMeetcutesPlatform({ action, params = {} }) {
-  const response = await fetch(
-    `${process.env.MEETCUTES_API_URL}/api/v1/admin/mcp-action`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-MCP-Admin-Key": process.env.MCP_ADMIN_SECRET_KEY,
-      },
-      body: JSON.stringify({ action, params }),
-    },
-  );
-
-  return await response.json();
-}
-```
-
-## Curl smoke test
-
-```bash
-curl -X POST "$MEETCUTES_API_URL/api/v1/admin/mcp-action" \
-  -H "Content-Type: application/json" \
-  -H "X-MCP-Admin-Key: $MCP_ADMIN_SECRET_KEY" \
-  -d '{"action":"get_system_stats"}'
-```
-
----
-
-# Self-Hosted Production Deployment (Kamal 2)
-
-This section describes a single-server, zero-downtime launch of the Phoenix API
-behind `kamal-proxy`. The frontend is a separate static container and can be
-served by the same proxy or by any CDN.
-
-## Deployment pieces
-
-| Asset | Location | Purpose |
-| --- | --- | --- |
-| API image | `meetcutes-elixir/Dockerfile` | Multi-stage Elixir/OTP release, runs as `nobody` |
-| Boot overlay | `meetcutes-elixir/rel/overlays/bin/server` | Runs `Meetcutes.Release.migrate` before `start` |
-| Kamal config | `meetcutes-elixir/config/deploy.yml` | `kamal-proxy`, health checks, secrets |
-| Health probe | `meetcutes-elixir/lib/meetcutes_web/plugs/health_check.ex` | `GET /health` DB + migration gate |
-| Web image | `meetcutes-fe/Dockerfile` | Vite build served by nginx with SPA fallback |
-| nginx config | `meetcutes-fe/nginx.conf` | `try_files ... /index.html` |
-
-The boot sequence is:
-
-1. Kamal starts the new container.
-2. `bin/server` runs `Meetcutes.Release.migrate/0`.
-3. Phoenix binds `0.0.0.0:4000` with `PHX_SERVER=true`.
-4. `kamal-proxy` calls `GET /health` every 3 seconds.
-5. The proxy switches traffic only after a `200 {"status":"healthy"}`.
-6. The previous container drains and is retired.
-
-If the database is unreachable or a migration is still pending, `/health`
-returns `503 {"status":"unhealthy"}` and the rollout is aborted instead of
-routing users to a broken schema.
-
-## 1. Prerequisites
-
-- A Linux server with a public IPv4 address and SSH access.
-- Two DNS records pointing at that server:
-  - `api.meetcutes.us` for the Phoenix API.
-  - `meetcutes.us` (and optionally `www`) for the frontend.
-- A container registry. The examples use GitHub Container Registry
-  (`ghcr.io`); Docker Hub or any OCI registry works with the same pattern.
+- A Linux host with Docker and SSH access for Kamal.
+- A container registry account (the examples use `ghcr.io`).
 - Kamal 2 installed locally:
-
   ```bash
   gem install kamal
   kamal version
   ```
+- A PostgreSQL 16 database with the PostGIS extension available.
+- A Cloudflare account for the frontend and R2 bucket.
+- A Resend account and verified sending domain.
+- A Stripe account with webhook access.
+- Ports 80/443 open on the API host; port 5432 private.
 
-- The `.kamal/` directory and `config/deploy.yml` live in `meetcutes-elixir/`.
-  Run every Kamal command from that directory.
+## 3. Backend secrets
 
-## 2. Firewall and network rules
-
-Ports **80** and **443** must be open for `kamal-proxy` to obtain certificates
-and serve traffic. Keep SSH available, and never expose the internal app port
-or Postgres publicly.
-
-On Ubuntu with `ufw`:
-
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 443/udp   # HTTP/3 through kamal-proxy
-sudo ufw enable
-sudo ufw status verbose
-```
-
-Also open 80/443/22 in the cloud provider's security group or firewall. If the
-database is managed, allow the server's public IP (or private network range) on
-the Postgres port; do not open 5432 to `0.0.0.0/0`.
-
-## 3. Registry setup
-
-Create a GitHub token with `write:packages` (classic) or a fine-grained token
-with package write permission, then place it in `.kamal/secrets` as
-`KAMAL_REGISTRY_PASSWORD`. Update these values in `config/deploy.yml`:
-
-```yaml
-image: <your-org>/meetcutes-api
-registry:
-  server: ghcr.io
-  username: <your-org>
-```
-
-Kamal builds the final repository as `registry.server/image`, so the image
-name must not repeat `ghcr.io`. The resulting image is
-`ghcr.io/<your-org>/meetcutes-api`. The image name and registry username are
-deployment identifiers, not secrets. The token is read from `.kamal/secrets`
-at deploy time.
-
-## 4. Configure `.kamal/secrets`
-
-Copy the example and fill in real values:
+Copy the example and fill in production values:
 
 ```bash
 cp .kamal/secrets.example .kamal/secrets
 chmod 600 .kamal/secrets
 ```
 
-`.kamal/secrets` is a local shell fragment. Kamal evaluates it and injects the
-listed variables into the container; the file must never be committed or baked
-into an image. It is already ignored by `.gitignore`.
-
 Minimum required values:
 
 ```bash
 KAMAL_REGISTRY_PASSWORD='...'
-DATABASE_URL='ecto://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require'
+DATABASE_URL='ecto://USER:PASSWORD@DB_HOST:5432/meetcutes_prod?sslmode=require'
 SECRET_KEY_BASE='...'
 DASHBOARD_USER='admin'
 DASHBOARD_PASSWORD='...'
 STRIPE_SECRET_KEY='sk_live_...'
-RESEND_API_KEY='re_...'
-```
-
-Additional values referenced by `config/deploy.yml`:
-
-```bash
 STRIPE_WEBHOOK_SECRET='whsec_...'
+RESEND_API_KEY='re_...'
 MCP_ADMIN_SECRET_KEY='...'
 AWS_ACCESS_KEY_ID='...'
 AWS_SECRET_ACCESS_KEY='...'
 CLOUDFLARE_ACCOUNT_ID='...'
 ```
 
-Generate the high-entropy values locally:
+Generate high-entropy values locally:
 
 ```bash
-mix phx.gen.secret                       # SECRET_KEY_BASE
-openssl rand -base64 48                  # DASHBOARD_PASSWORD
-openssl rand -hex 32                     # MCP_ADMIN_SECRET_KEY
+mix phx.gen.secret                 # SECRET_KEY_BASE
+openssl rand -base64 48            # DASHBOARD_PASSWORD
+openssl rand -hex 32               # MCP_ADMIN_SECRET_KEY
 ```
 
-Values can also be pulled from a password manager inside `.kamal/secrets`:
+`.kamal/secrets` is a local shell fragment evaluated by Kamal. It is ignored by Git and must never be baked into an image.
+
+## 4. Backend image
+
+The multi-stage `Dockerfile`:
+
+1. Uses `hexpm/elixir:1.17.2-erlang-27.0.1-alpine-3.20.2` to fetch and compile dependencies.
+2. Copies `config`, `priv`, `lib`, and `rel`.
+3. Compiles the application, runs `mix assets.deploy`, and builds an OTP release.
+4. Copies only the release into a minimal Alpine runtime image.
+5. Runs as `nobody` with `PHX_SERVER=true` and `ERL_CRASH_DUMP=/tmp/erl_crash.dump`.
+
+The release boot overlay is `rel/overlays/bin/server`. It runs `Meetcutes.Release.migrate/0` before starting the server, then Phoenix listens on the internal port.
+
+Useful local checks:
 
 ```bash
-SECRET_KEY_BASE=$(op read "op://Meetcutes/production/secret_key_base")
-DATABASE_URL=$(op read "op://Meetcutes/production/database_url")
+docker build -t meetcutes-api .
+docker run --rm -p 4000:4000 \
+  -e DATABASE_URL='ecto://postgres:postgres@host.docker.internal/meetcutes_dev' \
+  -e SECRET_KEY_BASE="$(mix phx.gen.secret)" \
+  meetcutes-api
 ```
 
-## 5. Review `config/deploy.yml`
+## 5. Kamal 2 API deployment
 
-Replace the placeholders before the first deploy:
+Run every Kamal command from the repository root containing `config/deploy.yml`.
 
-- `image` and `registry` — your registry namespace.
-- `servers.web.hosts` — the public server IP.
-- `proxy.host` — `api.meetcutes.us`.
-- `PHX_HOST`, `FRONTEND_URL`, and `CORS_ORIGINS` — your real domains.
+Review and update:
 
-The internal contract is intentionally fixed:
+- `image`
+- `servers.web.hosts`
+- `proxy.host`
+- `registry.server` / `registry.username`
+- `builder.arch`
+- `env.clear` and `env.secret`
+- Optional Grafana Loki logging settings
 
-```yaml
-proxy:
-  ssl: true
-  forward_headers: true
-  app_port: 4000
-  healthcheck:
-    path: /health
-    interval: 3
-    timeout: 5
-```
-
-`kamal-proxy` retries the health check until the top-level `deploy_timeout`
-(default 30 seconds, set to 120 seconds in this config) expires. The boot
-overlay runs migrations before the server binds, so the first check may happen
-while the release is still preparing.
-
-The container listens on `PORT=4000`; `PHX_URL_SCHEME=https` and
-`PHX_URL_PORT=443` keep generated URLs public even though the app is bound to a
-private port.
-
-Validate the merged configuration before deploying:
+Deploy:
 
 ```bash
-kamal config
+kamal setup        # first deployment
+kamal deploy       # subsequent deployments
+kamal details
+kamal app logs -f
+kamal rollback     # revert to the previous image
 ```
 
-## 6. Build and verify locally
+`config/deploy.yml` uses `kamal-proxy` with TLS, forwarded client headers, and a `/health` probe. The proxy switches traffic only after the new container returns a healthy response. `deploy_timeout` allows the migration step to finish.
+
+### Health and migration gate
+
+- `/health` — database and migration readiness; returns `200` only when the schema is current.
+- `/api/health` — application health endpoint used by smoke checks.
+
+If the database is unreachable or a migration is pending, the boot/health gate fails and Kamal does not route traffic to the new container.
+
+## 6. Database
+
+Provision PostgreSQL 16 and enable PostGIS:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS postgis;
+```
+
+Use a managed database when possible. Restrict the database port to the API host or private network. Keep `sslmode=require` in `DATABASE_URL` unless the connection is inside a trusted private network.
+
+Migrations run automatically through the release overlay. For a manual release:
+
+```bash
+_build/prod/rel/meetcutes/bin/meetcutes eval "Meetcutes.Release.migrate()"
+_build/prod/rel/meetcutes/bin/meetcutes start
+```
+
+## 7. Frontend deployment on Cloudflare
+
+The frontend is a static Vite bundle deployed through Wrangler. `wrangler.toml` publishes `./dist` as static assets with SPA fallback for React Router.
+
+```bash
+cd meetcutes-fe
+npm ci
+npm run cf:whoami
+npm run cf:preview
+npm run cf:deploy
+```
+
+Set these build-time values in Cloudflare Pages or the shell running Wrangler:
+
+```env
+VITE_API_URL=https://api.meetcutes.us
+VITE_WS_URL=wss://api.meetcutes.us/socket
+VITE_SITE_URL=https://meetcutes.us
+VITE_REACT_APP_GEOAPIFY_API_KEY=...
+VITE_MAINTENANCE_MODE=false
+VITE_ASSET_HOST=https://assets.meetcutes.us
+VITE_CDN_URL=https://assets.meetcutes.us
+```
+
+Vite inlines `VITE_*` values at build time. Rebuild and redeploy after changing them.
+
+Attach `meetcutes.us` and `www.meetcutes.us` to the Cloudflare project and configure the API CORS allow-list:
+
+```env
+CORS_ORIGINS=https://meetcutes.us,https://www.meetcutes.us
+```
+
+The API socket must also be reachable at `wss://api.meetcutes.us/socket`.
+
+## 8. Storage, email, and payments
+
+### Cloudflare R2 / S3
+
+Set the R2/S3 credentials and endpoint values in `.kamal/secrets`:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_S3_BUCKET`
+- `AWS_S3_HOST` (or `CLOUDFLARE_ACCOUNT_ID` to derive it)
+- `AWS_REGION` (`auto` for R2)
+- `AWS_S3_ASSET_HOST` (public CDN/custom domain)
+
+Uploads are validated by magic bytes before storage. The API never stores raw media in PostgreSQL.
+
+### Resend email
+
+Production uses the native Swoosh Resend adapter:
+
+- `RESEND_API_KEY`
+- `MAIL_FROM_EMAIL` (defaults to `noreply@meetcutes.us`)
+
+Verify the sending domain in Resend before launch. Confirmation and reset links use `FRONTEND_URL`.
+
+### Stripe
+
+Configure:
+
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- Optional `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, `STRIPE_PORTAL_RETURN_URL`
+
+The webhook is `POST /api/v1/payments/webhook`. Register the production URL in Stripe and keep the signing secret only in `.kamal/secrets`. Membership invoices are stored in R2; `INVOICE_STORAGE=local` skips that for local/E2E runs.
+
+## 9. MCP administrative API
+
+The platform is administered through the protected MCP command endpoint:
+
+```http
+POST /api/v1/admin/mcp-action
+Content-Type: application/json
+X-MCP-Admin-Key: <MCP_ADMIN_SECRET_KEY>
+```
+
+Example actions:
+
+- `get_system_stats`
+- `toggle_maintenance`
+- `toggle_paywall`
+- `update_user_status`
+- `force_match_count`
+- `push_notification`
+- `set_global_announcement`
+
+The endpoint rejects missing or incorrect keys with `401`. Keep `MCP_ADMIN_SECRET_KEY` server-side and never expose it to the browser or an LLM prompt. The request/response tool definition lives in `mcp-config.json`.
+
+## 10. Verification checklist
 
 Backend:
 
 ```bash
-docker build -t meetcutes-api:local .
-docker run --rm -p 4000:4000 \
-  --env-file .env.production \
-  meetcutes-api:local
+mix deps.unlock --unused
+mix compile --warnings-as-errors
+mix test
+mix precommit
 ```
-
-Then:
-
-```bash
-curl -i http://localhost:4000/health
-# HTTP/1.1 200 OK
-# {"status":"healthy"}
-```
-
-To prove the failure path, stop Postgres (or point `DATABASE_URL` at an
-unreachable host) and repeat the request. The response must be
-`503 {"status":"unhealthy"}`.
 
 Frontend:
 
 ```bash
-docker build \
-  --build-arg VITE_API_URL=https://api.meetcutes.us \
-  -t meetcutes-web:local .
-
-docker run --rm -p 8080:80 meetcutes-web:local
-
-curl -I http://localhost:8080/dashboard/settings
-# 200, served by index.html for the React Router SPA fallback
+npm ci
+npx eslint .
+npm run build
+npx playwright test
 ```
 
-## 7. First deploy
+Smoke checks after deployment:
 
-Bootstrap Docker on the server, then perform the first blue-green rollout:
+1. `GET https://api.meetcutes.us/health` returns `200`.
+2. `GET https://api.meetcutes.us/api/health` returns `200`.
+3. Registration sends a Resend confirmation email.
+4. Login returns a bearer token and the dashboard loads.
+5. Profile image upload reaches R2 and returns a public URL.
+6. A Stripe webhook is accepted and an invoice row is created.
+7. Oban queues are processing and no failed jobs accumulate.
+8. The frontend deep link `/dashboard/search` loads after a hard refresh.
+9. Playwright signup, login, discovery, and notification flows pass.
 
-```bash
-kamal server bootstrap
-kamal setup
-```
+## 11. Secret hygiene
 
-`kamal server bootstrap` installs Docker and prepares the host.
-`kamal setup` deploys the app for the first time. On later releases use:
-
-```bash
-kamal deploy
-```
-
-Kamal starts the new container alongside the old one, waits for the proxy
-health check, switches traffic, and only then stops the old container. There is
-no downtime window.
-
-## 8. Verify and operate
-
-```bash
-kamal details                 # servers, containers, proxy status
-kamal app logs -f             # Phoenix logs
-kamal proxy logs -f           # TLS + health-check traffic
-kamal app exec --reuse "bin/meetcutes eval 'Meetcutes.Release.migrate'"
-kamal rollback <VERSION>      # return to a previous image
-```
-
-Public checks:
-
-```bash
-curl https://api.meetcutes.us/health
-curl https://api.meetcutes.us/api/v1/public/global-announcement
-curl -I https://meetcutes.us/
-```
-
-Expected health payloads:
-
-```json
-{ "status": "healthy" }
-```
-
-```json
-{ "status": "unhealthy" }
-```
-
-## 9. Runtime environment matrix
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `DATABASE_URL` | yes | Postgres connection; include `sslmode=require` for hosted DBs |
-| `SECRET_KEY_BASE` | yes | Cookie/token signing |
-| `DASHBOARD_USER` | yes | LiveDashboard operator |
-| `DASHBOARD_PASSWORD` | yes | LiveDashboard password |
-| `STRIPE_SECRET_KEY` | billing | Stripe API |
-| `STRIPE_WEBHOOK_SECRET` | billing | Stripe webhook verification |
-| `RESEND_API_KEY` | yes | Transactional email |
-| `MAIL_FROM_EMAIL` | no | White-labeled sender (default `noreply@meetcutes.us`) |
-| `MCP_ADMIN_SECRET_KEY` | admin | `X-MCP-Admin-Key` gate |
-| `PHX_HOST` | yes | Public host for generated URLs |
-| `PORT` | yes | Internal container port (`4000`) |
-| `PHX_URL_SCHEME` / `PHX_URL_PORT` | yes | Public URL scheme/port |
-| `CORS_ORIGINS` | yes | Comma-separated browser origins |
-| `DATABASE_POOL_SIZE` | no | Repo pool size (default 10) |
-| `OBAN_*_CONCURRENCY` | no | Oban queue concurrency |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | images | R2/S3 uploads |
-| `CLOUDFLARE_ACCOUNT_ID` | images | Derives the R2 endpoint |
-| `PAYMENT_FEATURE_ENABLED` | no | Runtime paywall toggle |
-| `MAINTENANCE_MODE_ACTIVE` | no | Runtime maintenance toggle |
-
-The periodic IANA timezone updaters are disabled in production
-(`config :meetcutes, :start_tz_updater, false` and
-`config :tzdata, :autoupdate, :disabled`). The release runs as `nobody` from an
-immutable filesystem, so runtime recompilation of timezone data would fail.
-Refresh timezone data by rebuilding the image with updated `:tz` / `:tzdata`
-dependencies.
-
-All application values are read at runtime by `config/runtime.exs`. The image
-contains no environment-specific credentials and the same artifact can be
-promoted between environments.
-
-## 10. Frontend deployment options
-
-The frontend image is independent of the API:
-
-```bash
-docker build \
-  --build-arg VITE_API_URL=https://api.meetcutes.us \
-  --build-arg VITE_WS_URL=wss://api.meetcutes.us/socket \
-  --build-arg VITE_SITE_URL=https://meetcutes.us \
-  --build-arg VITE_REACT_APP_GEOAPIFY_API_KEY=<your-browser-key> \
-  -t meetcutes-web:latest .
-```
-
-`VITE_API_URL` is mandatory: the image build fails if it is empty so a
-production bundle can never silently fall back to `http://localhost:4000`.
-`VITE_REACT_APP_GEOAPIFY_API_KEY` is a public browser key, not a server secret.
-
-It can be served by the same Kamal proxy as a second service:
-
-```yaml
-service: meetcutes-web
-image: ghcr.io/your-org/meetcutes-web
-servers:
-  web:
-    hosts:
-      - 203.0.113.10
-proxy:
-  ssl: true
-  host: meetcutes.us
-  app_port: 80
-  healthcheck:
-    path: /health
-```
-
-Any static host (Cloudflare Pages, S3 + CDN, Caddy) also works as long as it
-rewrites unknown paths to `index.html`. `nginx.conf` in `meetcutes-fe/` already
-implements that fallback and long-lived caching for hashed `/assets/` files.
-
-`VITE_*` values are inlined by Vite at build time, so each environment needs
-its own image build. Keep API URLs out of source code; pass them as build args.
-
-## 11. Troubleshooting
-
-**`/health` returns 503 after deploy**
-
-```bash
-kamal app logs -f
-```
-
-Common causes:
-
-- `DATABASE_URL` is missing, malformed, or the server IP is not allowed by the
-  database firewall.
-- A pending migration exists. The boot overlay should have run it; check for a
-  failed migration in the logs and run it manually with `kamal app exec`.
-- `RESEND_API_KEY` or `SECRET_KEY_BASE` is missing, so the release cannot boot.
-- The database requires TLS but `sslmode=require` is absent.
-
-**Proxy returns 502/503 while the app looks healthy**
-
-Check `kamal proxy logs -f`. Confirm `app_port` is `4000` and that the
-container is listening on all interfaces. Confirm DNS points at the server
-before the first TLS attempt.
-
-**Frontend deep links return 404**
-
-Ensure the nginx `try_files` fallback is present and that the static host is
-configured for an SPA. Hashed assets should return 200; unknown routes should
-return `index.html`.
-
-**Container permission errors**
-
-The runtime image runs as `nobody`. Do not mount root-owned directories that
-the app must write to. Uploads go to R2/S3, not the container filesystem.
-
-**Migrations need to be re-run manually**
-
-```bash
-kamal app exec --reuse "bin/meetcutes eval 'Meetcutes.Release.migrate'"
-```
-
-## 12. Security checklist
-
-- Ports 80/443 are the only public HTTP ports; 4000 and 5432 stay private.
-- `.kamal/secrets` is `chmod 600` and never committed.
-- Registry tokens are read-only for consumers and scoped for CI writers.
-- The API image runs as `nobody`; no build toolchain ships in the runtime.
-- `DATABASE_URL` uses TLS (`sslmode=require` or stronger).
-- `MCP_ADMIN_SECRET_KEY` is high entropy and stored separately from user
-  bearer tokens.
-- Rotate `SECRET_KEY_BASE`, dashboard credentials, Stripe, Resend, and MCP keys
-  through `.kamal/secrets` plus `kamal deploy`.
-- Keep the host patched and restrict SSH to trusted addresses where possible.
-
+- `.env`, `.env.*`, `.kamal/secrets`, and `.kamal/secrets.*` are ignored.
+- `.dockerignore` excludes `.git`, `.env*`, `.kamal`, `_build`, `deps`, `test`, and local upload folders.
+- Never print secrets in CI logs.
+- Rotate `SECRET_KEY_BASE`, database credentials, Stripe keys, Resend keys, and MCP keys after any suspected exposure.
