@@ -28,7 +28,7 @@ config :meetcutes, Meetcutes.Mailer, adapter: Swoosh.Adapters.Test
 
 # Never touch S3/R2 from tests.
 config :meetcutes, :image_storage, Meetcutes.Uploads.TestStorage
-config :meetcutes, :max_upload_bytes, 8_000_000
+config :meetcutes, :max_upload_bytes, 5_000_000
 
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false

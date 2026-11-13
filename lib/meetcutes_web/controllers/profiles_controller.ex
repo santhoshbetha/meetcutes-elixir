@@ -9,6 +9,8 @@ defmodule MeetcutesWeb.ProfilesController do
 
   action_fallback MeetcutesWeb.FallbackController
 
+  plug MeetcutesWeb.Plugs.UploadRateLimit when action in [:update, :upload_image]
+
   @handle_regex ~r/^[A-Za-z][A-Za-z0-9_]{4,14}$/
 
   @doc """

@@ -14,6 +14,10 @@ defmodule Meetcutes.Profiles do
   alias Meetcutes.GeoPrivacy
   alias Meetcutes.Repo
   alias Meetcutes.Uploads
+  alias Meetcutes.Uploads.PhotoHash
+
+  import Ecto.Query, warn: false
+  require Logger
 
   @legacy_aliases %{
     "userhandle" => "nickname",
@@ -57,21 +61,21 @@ defmodule Meetcutes.Profiles do
   """
   def update_profile(%User{} = user, attrs, opts \\ []) when is_map(attrs) do
     normalized = normalize_attrs(attrs, user)
-    avatar = opts[:avatar] || take_upload(normalized, "avatar")
-    banner = opts[:banner] || take_upload(normalized, "banner")
+    avatar_upload = opts[:avatar] || take_upload(normalized, "avatar")
+    banner_upload = opts[:banner] || take_upload(normalized, "banner")
     normalized = Map.drop(normalized, ["avatar", "banner"])
 
-    changeset = User.profile_changeset(user, normalized)
+    with :ok <- Uploads.validate(avatar_upload),
+         :ok <- Uploads.validate(banner_upload),
+         {:ok, avatar_media} <- prepare_optional_media(user, :avatar, avatar_upload) do
+      case prepare_optional_media(user, :banner, banner_upload) do
+        {:ok, banner_media} ->
+          apply_profile_update(user, normalized, avatar_media, banner_media)
 
-    with :ok <- Uploads.validate(avatar),
-         :ok <- Uploads.validate(banner) do
-      Repo.transact(fn ->
-        with {:ok, updated} <- Repo.update(changeset),
-             {:ok, updated} <- maybe_store_media(updated, :avatar, avatar),
-             {:ok, updated} <- maybe_store_media(updated, :banner, banner) do
-          {:ok, updated}
-        end
-      end)
+        {:error, reason} ->
+          cleanup_media(user, avatar_media)
+          {:error, reason}
+      end
     end
   end
 
@@ -102,25 +106,64 @@ defmodule Meetcutes.Profiles do
   def set_image(%User{} = user, slot, %Plug.Upload{} = upload)
       when is_integer(slot) and slot >= 0 and slot < @max_images do
     current = normalize_images(user.images)
+    previous = Enum.at(current, slot)
 
-    with {:ok, %{filename: filename}} <- Uploads.store(user, :image, upload) do
-      images = put_image_slot(current, slot, filename)
-      changeset = User.images_changeset(user, images)
+    with {:ok, media} <- Uploads.prepare(user, :image, upload) do
+      images = put_image_slot(current, slot, media.filename)
 
-      case Repo.update(changeset) do
+      result =
+        Repo.transact(fn ->
+          with :ok <- claim_media_hash(user, media),
+               {:ok, updated} <- Repo.update(User.images_changeset(user, images)),
+               :ok <- release_media_hash(user, previous) do
+            {:ok, updated}
+          end
+        end)
+
+      case result do
         {:ok, updated} ->
-          # Best effort: drop the file this slot used to point at.
-          Uploads.delete(user, Enum.at(current, slot))
+          enqueue_media_deletes(user, [previous])
           {:ok, updated}
 
-        {:error, changeset} ->
-          Uploads.delete(user, filename)
-          {:error, changeset}
+        {:error, reason} ->
+          cleanup_media(user, media)
+          {:error, reason}
       end
     end
   end
 
   def set_image(_user, _slot, _upload), do: {:error, :invalid_image}
+
+  @doc """
+  Stores a new avatar and atomically claims its hash before updating the user.
+  """
+  def update_avatar(%User{} = user, %Plug.Upload{} = upload) do
+    with {:ok, media} <- Uploads.prepare(user, :avatar, upload) do
+      previous = filename_from_media(user.avatar)
+
+      result =
+        Repo.transact(fn ->
+          with :ok <- claim_media_hash(user, media),
+               {:ok, updated} <-
+                 Repo.update(User.media_changeset(user, %{avatar: media_metadata(media)})),
+               :ok <- release_media_hash(user, previous) do
+            {:ok, updated}
+          end
+        end)
+
+      case result do
+        {:ok, updated} ->
+          enqueue_media_deletes(user, [previous])
+          {:ok, updated, media}
+
+        {:error, reason} ->
+          cleanup_media(user, media)
+          {:error, reason}
+      end
+    end
+  end
+
+  def update_avatar(_user, _upload), do: {:error, :invalid_image}
 
   @doc """
   Clears a 0-based photo slot and removes the stored file.
@@ -139,13 +182,21 @@ defmodule Meetcutes.Profiles do
         changeset =
           User.images_changeset(user, List.replace_at(images, slot, ""))
 
-        case Repo.update(changeset) do
+        result =
+          Repo.transact(fn ->
+            with {:ok, updated} <- Repo.update(changeset),
+                 :ok <- release_media_hash(user, filename) do
+              {:ok, updated}
+            end
+          end)
+
+        case result do
           {:ok, updated} ->
-            Uploads.delete(user, filename)
+            enqueue_media_deletes(user, [filename])
             {:ok, updated}
 
-          {:error, changeset} ->
-            {:error, changeset}
+          {:error, reason} ->
+            {:error, reason}
         end
 
       _empty ->
@@ -496,16 +547,129 @@ defmodule Meetcutes.Profiles do
     end
   end
 
-  defp maybe_store_media(user, _kind, nil), do: {:ok, user}
+  defp apply_profile_update(user, attrs, avatar_media, banner_media) do
+    changeset =
+      user
+      |> User.profile_changeset(attrs)
+      |> put_media_change(:avatar, avatar_media)
+      |> put_media_change(:banner, banner_media)
 
-  defp maybe_store_media(user, kind, %Plug.Upload{} = upload) do
-    case Uploads.store(user, kind, upload) do
-      {:ok, media} ->
-        key = if kind == :avatar, do: :avatar, else: :banner
-        user |> User.media_changeset(%{key => media}) |> Repo.update()
+    old_avatar = if avatar_media, do: filename_from_media(user.avatar), else: nil
+    old_banner = if banner_media, do: filename_from_media(user.banner), else: nil
+    old_files = Enum.filter([old_avatar, old_banner], &is_binary/1)
+
+    result =
+      Repo.transact(fn ->
+        with {:ok, updated} <- Repo.update(changeset),
+             :ok <- claim_media_hash(user, avatar_media),
+             :ok <- claim_media_hash(user, banner_media),
+             :ok <- release_media_hash(user, old_avatar),
+             :ok <- release_media_hash(user, old_banner) do
+          {:ok, updated}
+        end
+      end)
+
+    case result do
+      {:ok, updated} ->
+        enqueue_media_deletes(user, old_files)
+        {:ok, updated}
 
       {:error, reason} ->
+        cleanup_media(user, [avatar_media, banner_media])
         {:error, reason}
     end
   end
+
+  defp prepare_optional_media(_user, _kind, nil), do: {:ok, nil}
+
+  defp prepare_optional_media(%User{} = user, kind, %Plug.Upload{} = upload) do
+    Uploads.prepare(user, kind, upload)
+  end
+
+  defp prepare_optional_media(_user, _kind, _upload), do: {:error, :invalid_image}
+
+  defp put_media_change(changeset, _key, nil), do: changeset
+
+  defp put_media_change(changeset, key, media) do
+    Ecto.Changeset.put_change(changeset, key, media_metadata(media))
+  end
+
+  defp media_metadata(media) when is_map(media) do
+    Map.drop(media, [:sha256, "sha256"])
+  end
+
+  defp claim_media_hash(_user, nil), do: :ok
+
+  defp claim_media_hash(%User{} = user, %{sha256: hash, filename: filename})
+       when is_binary(hash) and is_binary(filename) and filename != "" do
+    # Serialize the cross-account duplicate check per content hash. The lock is
+    # transaction-scoped, so concurrent uploads cannot both pass the check.
+    Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [hash])
+
+    other_claim =
+      Repo.one(
+        from h in PhotoHash,
+          where: h.hash == ^hash and h.user_id != ^user.id,
+          limit: 1
+      )
+
+    if other_claim do
+      {:error, :duplicate_photo}
+    else
+      case Repo.insert(
+             PhotoHash.changeset(%PhotoHash{}, %{
+               hash: hash,
+               filename: filename,
+               user_id: user.id
+             })
+           ) do
+        {:ok, _claim} -> :ok
+        {:error, changeset} -> {:error, changeset}
+      end
+    end
+  end
+
+  defp claim_media_hash(_user, _media), do: :ok
+
+  defp release_media_hash(_user, nil), do: :ok
+  defp release_media_hash(_user, ""), do: :ok
+
+  defp release_media_hash(%User{id: user_id}, filename) when is_binary(filename) do
+    Repo.delete_all(
+      from h in PhotoHash,
+        where: h.user_id == ^user_id and h.filename == ^filename
+    )
+
+    :ok
+  end
+
+  defp enqueue_media_deletes(_user, []), do: :ok
+
+  defp enqueue_media_deletes(%User{} = user, filenames) when is_list(filenames) do
+    Enum.each(filenames, fn filename ->
+      if is_binary(filename) and filename != "" do
+        case Uploads.enqueue_delete(user, filename) do
+          {:ok, _job} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error("Unable to enqueue media deletion for #{filename}: #{inspect(reason)}")
+        end
+      end
+    end)
+  end
+
+  defp cleanup_media(_user, nil), do: :ok
+
+  defp cleanup_media(%User{} = user, media) when is_list(media) do
+    Enum.each(media, &cleanup_media(user, &1))
+  end
+
+  defp cleanup_media(%User{} = user, media) when is_map(media) do
+    enqueue_media_deletes(user, [filename_from_media(media)])
+  end
+
+  defp filename_from_media(%{"filename" => filename}) when is_binary(filename), do: filename
+  defp filename_from_media(%{filename: filename}) when is_binary(filename), do: filename
+  defp filename_from_media(_media), do: nil
 end

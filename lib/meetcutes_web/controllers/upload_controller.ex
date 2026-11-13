@@ -1,13 +1,14 @@
 defmodule MeetcutesWeb.UploadController do
   use MeetcutesWeb, :controller
 
-  alias Meetcutes.Accounts.User
   alias Meetcutes.ImageUploader
-  alias Meetcutes.Repo
+  alias Meetcutes.Profiles
   alias Meetcutes.Uploads
   alias MeetcutesWeb.UploadJSON
 
   action_fallback MeetcutesWeb.FallbackController
+
+  plug MeetcutesWeb.Plugs.UploadRateLimit when action in [:upload, :upload_avatar]
 
   # POST "/upload"
   #
@@ -38,11 +39,14 @@ defmodule MeetcutesWeb.UploadController do
   def upload_avatar(conn, %{"file" => %Plug.Upload{} = upload}) do
     user = conn.assigns.current_user
 
-    with {:ok, media} <- Uploads.store(user, :avatar, upload),
-         {:ok, _updated_user} <- persist_avatar(user, media) do
-      conn
-      |> put_status(:ok)
-      |> json(UploadJSON.avatar(%{avatar_url: media.url, media: media}))
+    case Profiles.update_avatar(user, upload) do
+      {:ok, _updated_user, media} ->
+        conn
+        |> put_status(:ok)
+        |> json(UploadJSON.avatar(%{avatar_url: media.url, media: media}))
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -77,11 +81,5 @@ defmodule MeetcutesWeb.UploadController do
         |> put_status(:not_found)
         |> json(UploadJSON.error(%{error: "Avatar not found"}))
     end
-  end
-
-  defp persist_avatar(%User{} = user, media) do
-    user
-    |> User.media_changeset(%{avatar: media})
-    |> Repo.update()
   end
 end

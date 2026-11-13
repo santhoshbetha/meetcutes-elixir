@@ -7,8 +7,9 @@ defmodule Meetcutes.Uploads.ImageValidator do
   its size is within the configured limit.
   """
 
-  @default_max_bytes 8_000_000
+  @default_max_bytes 5_000_000
   @read_bytes 12
+  @hash_chunk_bytes 1_048_576
 
   @type result :: {:ok, String.t()} | {:error, :invalid_image | :image_too_large | :empty_file}
 
@@ -38,6 +39,37 @@ defmodule Meetcutes.Uploads.ImageValidator do
   end
 
   def detect(_upload), do: {:error, :invalid_image}
+
+  @doc """
+  Computes a lowercase SHA-256 digest using a bounded 1 MB read loop.
+
+  The file is never loaded into a single BEAM binary, so concurrent mobile
+  uploads keep memory usage flat regardless of file size.
+  """
+  @spec sha256(Plug.Upload.t()) :: {:ok, String.t()} | {:error, :invalid_image}
+  def sha256(%Plug.Upload{path: path}) when is_binary(path) do
+    case File.open(path, [:read, :binary], fn file ->
+           hash_stream(file, :crypto.hash_init(:sha256))
+         end) do
+      {:ok, {:ok, digest}} -> {:ok, digest}
+      _ -> {:error, :invalid_image}
+    end
+  end
+
+  def sha256(_upload), do: {:error, :invalid_image}
+
+  defp hash_stream(file, context) do
+    case IO.binread(file, @hash_chunk_bytes) do
+      :eof ->
+        {:ok, :crypto.hash_final(context) |> Base.encode16(case: :lower)}
+
+      data when is_binary(data) ->
+        hash_stream(file, :crypto.hash_update(context, data))
+
+      {:error, _reason} ->
+        {:error, :invalid_image}
+    end
+  end
 
   defp detect_bytes(<<0xFF, 0xD8, 0xFF, _::binary>>), do: {:ok, "image/jpeg"}
 

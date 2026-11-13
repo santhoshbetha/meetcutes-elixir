@@ -118,6 +118,10 @@ config :ex_aws,
   access_key_id: aws_access_key_id,
   secret_access_key: aws_secret_access_key,
   region: get_env.("AWS_REGION") || "auto",
+  hackney_opts: [
+    connect_timeout: 5_000,
+    recv_timeout: 60_000
+  ],
   s3: [
     scheme: aws_s3_scheme,
     host: aws_s3_host,

@@ -129,6 +129,17 @@ defmodule MeetcutesWeb.FallbackController do
     })
   end
 
+  def call(conn, {:error, :duplicate_photo}) do
+    conn
+    |> put_status(:conflict)
+    |> json(%{
+      status: "error",
+      code: "duplicate_photo",
+      message: "This photo has already been uploaded by another account",
+      errors: %{image: ["is already claimed by another account"]}
+    })
+  end
+
   def call(conn, {:error, :empty_file}) do
     conn
     |> put_status(:unprocessable_entity)

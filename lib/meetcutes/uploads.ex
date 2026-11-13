@@ -8,6 +8,7 @@ defmodule Meetcutes.Uploads do
   """
 
   alias Meetcutes.Uploads.ImageValidator
+  alias Meetcutes.Workers.DeleteR2ObjectWorker
 
   @kinds [:avatar, :banner, :image]
 
@@ -26,6 +27,36 @@ defmodule Meetcutes.Uploads do
   end
 
   def store(_user, _kind, _upload), do: {:error, :invalid_image}
+
+  @doc """
+  Validates, hashes, and stores an upload, returning the media metadata plus
+  the streaming SHA-256 digest. The storage write happens before any database
+  transaction so a slow R2/S3 transfer never pins a pool connection.
+  """
+  @spec prepare(struct(), atom(), Plug.Upload.t()) ::
+          {:ok, map()} | {:error, atom()}
+  def prepare(user, kind, %Plug.Upload{} = upload) when kind in @kinds do
+    with {:ok, content_type} <- ImageValidator.validate(upload),
+         {:ok, digest} <- ImageValidator.sha256(upload),
+         {:ok, media} <- storage().store(user, kind, upload, content_type) do
+      {:ok, Map.put(media, :sha256, digest)}
+    end
+  end
+
+  def prepare(_user, _kind, _upload), do: {:error, :invalid_image}
+
+  @doc """
+  Enqueues asynchronous deletion of a stored object.
+  """
+  @spec enqueue_delete(struct(), String.t()) :: {:ok, Oban.Job.t()} | {:error, term()}
+  def enqueue_delete(%{id: user_id}, filename)
+      when is_binary(user_id) and is_binary(filename) and filename != "" do
+    %{user_id: user_id, filename: filename}
+    |> DeleteR2ObjectWorker.new()
+    |> Oban.insert()
+  end
+
+  def enqueue_delete(_user, _filename), do: {:ok, nil}
 
   @doc """
   Removes a stored file. Storage failures are best-effort: metadata is already

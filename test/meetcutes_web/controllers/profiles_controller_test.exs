@@ -1,5 +1,6 @@
 defmodule MeetcutesWeb.ProfilesControllerTest do
   use MeetcutesWeb.ConnCase, async: false
+  use Oban.Testing, repo: Meetcutes.Repo
 
   import Meetcutes.AccountsFixtures
 
@@ -7,6 +8,7 @@ defmodule MeetcutesWeb.ProfilesControllerTest do
   alias Meetcutes.Accounts.User
   alias Meetcutes.Relationships
   alias Meetcutes.Repo
+  alias Meetcutes.Workers.DeleteR2ObjectWorker
 
   setup %{conn: conn} do
     user = user_fixture()
@@ -260,6 +262,96 @@ defmodule MeetcutesWeb.ProfilesControllerTest do
       assert %{"status" => "error", "errors" => errors} = json_response(conn, 422)
       assert errors["image"] == ["must be uploaded one file per slot"]
       assert Repo.get!(User, user.id).images == []
+    end
+
+    test "rejects an identical image already claimed by another account", %{
+      user: first_user
+    } do
+      first_conn = auth_conn_for(first_user)
+      first_upload = image_upload(valid_png(), "shared.png")
+
+      first_conn =
+        post(first_conn, ~p"/api/v1/profiles/me/images", %{
+          "slot" => "0",
+          "file" => first_upload
+        })
+
+      assert json_response(first_conn, 200)
+
+      second_user = user_fixture()
+      second_conn = auth_conn_for(second_user)
+      second_upload = image_upload(valid_png(), "shared.png")
+
+      second_conn =
+        post(second_conn, ~p"/api/v1/profiles/me/images", %{
+          "slot" => "0",
+          "file" => second_upload
+        })
+
+      assert %{
+               "status" => "error",
+               "code" => "duplicate_photo",
+               "message" => message
+             } = json_response(second_conn, 409)
+
+      assert message =~ "another account"
+      assert Repo.get!(User, second_user.id).images == []
+
+      assert [job] = all_enqueued(worker: DeleteR2ObjectWorker, queue: :default)
+      assert job.args["user_id"] == second_user.id
+    end
+
+    test "enqueues the replaced slot object for asynchronous deletion", %{
+      conn: conn,
+      user: user
+    } do
+      first_upload = image_upload(valid_png(), "first.png")
+
+      conn =
+        post(conn, ~p"/api/v1/profiles/me/images", %{
+          "slot" => "0",
+          "file" => first_upload
+        })
+
+      assert %{"data" => %{"profile" => %{"images" => [first_filename]}}} =
+               json_response(conn, 200)
+
+      second_upload = image_upload(valid_png() <> <<1>>, "second.png")
+
+      conn =
+        post(conn, ~p"/api/v1/profiles/me/images", %{
+          "slot" => "0",
+          "file" => second_upload
+        })
+
+      assert %{"data" => %{"profile" => %{"images" => [second_filename]}}} =
+               json_response(conn, 200)
+
+      assert second_filename != first_filename
+
+      assert [job] = all_enqueued(worker: DeleteR2ObjectWorker, queue: :default)
+      assert job.args["user_id"] == user.id
+      assert job.args["filename"] == first_filename
+    end
+
+    test "enqueues removal of a deleted gallery object", %{conn: conn, user: user} do
+      upload = image_upload(valid_png(), "deletable.png")
+
+      conn =
+        post(conn, ~p"/api/v1/profiles/me/images", %{
+          "slot" => "0",
+          "file" => upload
+        })
+
+      assert %{"data" => %{"profile" => %{"images" => [filename]}}} =
+               json_response(conn, 200)
+
+      conn = delete(conn, ~p"/api/v1/profiles/me/images/0")
+      assert json_response(conn, 200)
+
+      assert [job] = all_enqueued(worker: DeleteR2ObjectWorker, queue: :default)
+      assert job.args["user_id"] == user.id
+      assert job.args["filename"] == filename
     end
   end
 
@@ -515,6 +607,13 @@ defmodule MeetcutesWeb.ProfilesControllerTest do
       filename: filename,
       content_type: "image/png"
     }
+  end
+
+  defp auth_conn_for(user) do
+    token = Accounts.generate_user_session_token(user)
+
+    build_conn()
+    |> put_req_header("authorization", "Bearer " <> token)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:meetcutes, key)

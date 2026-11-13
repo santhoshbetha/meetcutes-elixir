@@ -22,6 +22,7 @@ proxy:
   forward_headers: true
   host: api.meetcutes.us
   app_port: 4000
+  response_timeout: 90
   healthcheck:
     path: /health
     interval: 3
