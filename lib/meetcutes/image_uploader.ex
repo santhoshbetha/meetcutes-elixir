@@ -31,6 +31,8 @@ defmodule Meetcutes.ImageUploader do
 
   use Waffle.Definition
 
+  require Logger
+
   @versions [:original]
   @extension_whitelist ~w(.jpg .jpeg .gif .png .webp)
 
@@ -160,8 +162,10 @@ defmodule Meetcutes.ImageUploader do
         {:ok, stored_filename}
 
       {:error, reason} ->
-        # Log the actual reason for better debugging in Cloudflare R2
-        IO.warn("Waffle store failed: #{inspect(reason)}")
+        Logger.error(
+          "R2/S3 object upload failed for user #{user.id} (#{filename}): #{inspect(reason)}"
+        )
+
         {:error, :store_failed}
     end
   end

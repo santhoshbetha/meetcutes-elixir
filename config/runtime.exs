@@ -100,6 +100,22 @@ aws_s3_port =
 aws_s3_bucket = get_env.("AWS_S3_BUCKET") || "meetcutes-images"
 aws_s3_scheme = get_env.("AWS_S3_SCHEME") || "https://"
 
+if config_env() == :prod do
+  if is_nil(get_env.("AWS_S3_BUCKET")) do
+    IO.warn(
+      "AWS_S3_BUCKET is not set; defaulting to meetcutes-images. " <>
+        "Add AWS_S3_BUCKET to .kamal/secrets and env.secret to use the production bucket."
+    )
+  end
+
+  if is_nil(get_env.("AWS_S3_ASSET_HOST")) do
+    IO.warn(
+      "AWS_S3_ASSET_HOST is not set; uploaded media URLs will use the private " <>
+        "R2 API endpoint instead of a public CDN URL."
+    )
+  end
+end
+
 # Waffle builds public URLs as `asset_host + "/" + key`. Fall back to the R2
 # endpoint (path-style) so uploads never silently point at AWS when the asset
 # host is not explicitly configured.
